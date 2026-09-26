@@ -6,10 +6,8 @@ import telebot
 from google import genai
 from google.genai import types
 
-# Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- SERVIDOR WEB SIMPLES (EXIGIDO PELO PLANO FREE DO RENDER) ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -21,11 +19,8 @@ def iniciar_servidor_web():
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
-# Inicia o servidor em segundo plano para o Render não dar erro
 threading.Thread(target=iniciar_servidor_web, daemon=True).start()
-# -----------------------------------------------------------------
 
-# LEITURA SEGURA DAS CHAVES
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
