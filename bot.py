@@ -1,24 +1,37 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from google import genai
 from google.genai import types
 
-# Configuração de Logs para ver mensagens de funcionamento no terminal
+# Configuração de Logs
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ==============================================================================
-# LEITURA SEGURA DAS CHAVES (Configuradas nas Variáveis de Ambiente do Render)
-# ==============================================================================
+# --- SERVIDOR WEB SIMPLES (EXIGIDO PELO PLANO FREE DO RENDER) ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot FutBet VIP Online!")
+
+def iniciar_servidor_web():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
+# Inicia o servidor em segundo plano para o Render não dar erro
+threading.Thread(target=iniciar_servidor_web, daemon=True).start()
+# -----------------------------------------------------------------
+
+# LEITURA SEGURA DAS CHAVES
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-# ==============================================================================
 
-# Conexão com a API do Telegram e do Gemini
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Prompt de Instruções que define como a IA analisa os jogos
 SYSTEM_PROMPT = """
 Você é o FutBet VIP AI, um especialista em inteligência estatística de futebol, análise tática e automação para canais do Telegram. Sua missão é realizar pesquisas diárias no mercado esportivo, analisar dados probabilísticos das partidas e gerar palpites completos, profissionais e formatados para envio direto aos membros.
 
@@ -43,7 +56,6 @@ Nunca faça promessas irrealistas de 'lucro 100% garantido'. Enfatize a gestão 
 """
 
 def consultar_gemini(user_prompt: str, usar_busca_web: bool = True) -> str:
-    """Função que envia o pedido para a IA e faz pesquisas no Google."""
     try:
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
@@ -62,8 +74,6 @@ def consultar_gemini(user_prompt: str, usar_busca_web: bool = True) -> str:
         logging.error(f"Erro na requisição da IA: {e}")
         return "⚠️ Ocorreu um erro ao pesquisar as estatísticas dos jogos. Tente novamente em instantes."
 
-# --- COMANDOS DO BOT NO TELEGRAM ---
-
 @bot.message_handler(commands=['start', 'ajuda'])
 def send_welcome(message):
     texto = (
@@ -80,10 +90,8 @@ def send_welcome(message):
 @bot.message_handler(commands=['palpites_hoje'])
 def palpites_hoje(message):
     msg_espera = bot.reply_to(message, "🔍 *A pesquisar os jogos de hoje, estatísticas recentes e desfalques na web... Aguarde alguns segundos.*", parse_mode='Markdown')
-    
     prompt_usuario = "Pesquise os jogos de futebol mais relevantes acontecendo hoje. Escolha os 3 melhores confrontos e gere palpites completos seguindo o formato padrão."
     resposta_ia = consultar_gemini(prompt_usuario, usar_busca_web=True)
-    
     bot.edit_message_text(resposta_ia, chat_id=msg_espera.chat.id, message_id=msg_espera.message_id, parse_mode='Markdown')
 
 @bot.message_handler(commands=['analisar'])
@@ -92,11 +100,9 @@ def analisar_jogo(message):
     if not termo:
         bot.reply_to(message, "⚠️ *Por favor, informe as equipes.* Exemplo: `/analisar Real Madrid vs Barcelona`", parse_mode='Markdown')
         return
-    
     msg_espera = bot.reply_to(message, f"📊 *A compilar dados, H2H e desfalques para:* `{termo}`...", parse_mode='Markdown')
     prompt_usuario = f"Pesquise e faça uma análise estatística completa para a partida: {termo}. Traga os dados mais recentes, prováveis escalações e a melhor entrada para este jogo."
     resposta_ia = consultar_gemini(prompt_usuario, usar_busca_web=True)
-    
     bot.edit_message_text(resposta_ia, chat_id=msg_espera.chat.id, message_id=msg_espera.message_id, parse_mode='Markdown')
 
 @bot.message_handler(commands=['vip'])
