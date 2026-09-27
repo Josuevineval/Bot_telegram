@@ -44,7 +44,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # Lista de modelos atualizados que resolvem o erro 404
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash']
+MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-2.5-flash']
 
 def chamar_gemini_com_fallback(prompt):
     if not client:
@@ -387,7 +387,7 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # Modelos atualizados e suportados pela API
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash']
+MODELS_TO_TRY = ['gemini-3.8-flash', 'gemini-2.5-flash']
 
 def chamar_gemini_com_fallback(prompt):
     if not client:
