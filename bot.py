@@ -88,79 +88,81 @@ def enviar_mensagem_segura(chat_id, texto, reply_to_id=None):
 
 
 # ==========================================
-# 4. GERADOR DE IMAGENS ESTILO TABELA LIMPA
+# 4. GERADOR DE IMAGENS EM CARTOÕES DE ALTA VISIBILIDADE
 # ==========================================
 def gerar_imagem_tabela(titulo, jogos, odd_total):
     """
-    Gera uma imagem estilizada em tabela limpa (fundo branco / texto escuro),
-    incluindo Hora, Liga, Partida, Palpite e Cotação (Odd).
+    Gera uma imagem estilizada com CARTOÕES VERTICAIS e FONTE GRANDE.
+    Fundo Claro, de altíssima legibilidade em ecrãs móveis.
     """
     if not HAS_PILLOW:
         return None
 
     try:
+        largura = 1000
+        
+        # Tenta carregar fontes com tamanho grande para legibilidade perfeita
+        try:
+            font_titulo = ImageFont.load_default(size=28)
+            font_bold = ImageFont.load_default(size=22)
+            font_normal = ImageFont.load_default(size=20)
+            font_sub = ImageFont.load_default(size=18)
+        except TypeError:
+            font_titulo = font_bold = font_normal = font_sub = ImageFont.load_default()
+
+        altura_header = 100
+        altura_card = 95
+        espaco_card = 14
+        altura_footer = 90
+        margem = 30
+
         num_jogos = len(jogos)
-        largura = 920
-        altura_cabecalho = 80
-        altura_linha_tabela = 40
-        altura_rodape = 60
-        margem = 20
+        altura_total = altura_header + (num_jogos * (altura_card + espaco_card)) + altura_footer + 40
 
-        altura_total = altura_cabecalho + 40 + (num_jogos * altura_linha_tabela) + altura_rodape + (margem * 2)
-
-        # Fundo Branco Puro (#FFFFFF)
-        img = Image.new('RGB', (largura, altura_total), color='#FFFFFF')
+        # Fundo Cinza Claro Suave
+        img = Image.new('RGB', (largura, altura_total), color='#F1F5F9')
         draw = ImageDraw.Draw(img)
 
-        # Moldura Exterior em Cinza Elegante
-        draw.rectangle([10, 10, largura - 10, altura_total - 10], outline='#CBD5E1', width=3)
-
-        # Banner de Cabeçalho (Escuro para Destaque)
-        draw.rectangle([20, 20, largura - 20, altura_cabecalho], fill='#0F172A')
-        font = ImageFont.load_default()
-        
+        # Cabeçalho Escuro Elegante
+        draw.rectangle([margem, 20, largura - margem, altura_header], fill='#0F172A')
         titulo_limpo = titulo.replace('*', '').replace('_', '').replace('`', '').upper()
-        draw.text((margem + 15, 40), f"⚽ FUTBET VIP — {titulo_limpo}", fill='#F59E0B', font=font)
+        draw.text((margem + 20, 35), f"⚽ FUTBET VIP — {titulo_limpo}", fill='#F59E0B', font=font_titulo)
 
-        # Cabeçalho da Tabela
-        y_tabela = altura_cabecalho + 10
-        draw.rectangle([20, y_tabela, largura - 20, y_tabela + 35], fill='#F1F5F9', outline='#E2E8F0')
-        draw.text((30, y_tabela + 10), "HORA / LIGA", fill='#475569', font=font)
-        draw.text((250, y_tabela + 10), "PARTIDA (MATCHES)", fill='#475569', font=font)
-        draw.text((560, y_tabela + 10), "PALPITE (CHOICES)", fill='#475569', font=font)
-        draw.text((790, y_tabela + 10), "ODD (VALUES)", fill='#475569', font=font)
+        y = altura_header + 20
 
-        y = y_tabela + 35
-
-        # Linhas dos Jogos
+        # Cartões Individuais para Cada Jogo
         for idx, jogo in enumerate(jogos):
-            bg_cor = '#FFFFFF' if idx % 2 == 0 else '#F8FAFC'
-            draw.rectangle([20, y, largura - 20, y + altura_linha_tabela], fill=bg_cor, outline='#F1F5F9')
+            # Desenha Cartão Branco com Borda
+            draw.rectangle([margem, y, largura - margem, y + altura_card], fill='#FFFFFF', outline='#CBD5E1', width=2)
+            
+            # Linha 1: Hora e Liga
+            hora_liga = f"⏰ {jogo.get('hora', '')}   |   🏆 {jogo.get('liga', '')}"
+            draw.text((margem + 20, y + 12), hora_liga, fill='#64748B', font=font_sub)
 
-            hora_liga = f"{jogo.get('hora', '')} | {jogo.get('liga', '')}"
-            partida = jogo.get('jogo', '')
-            palpite = jogo.get('palpite', '')
-            odd = str(jogo.get('odd', ''))
+            # Linha 2: Partida
+            partida = f"⚔️  {jogo.get('jogo', '')}"
+            draw.text((margem + 20, y + 38), partida, fill='#0F172A', font=font_bold)
 
-            draw.text((30, y + 12), hora_liga[:26], fill='#334155', font=font)
-            draw.text((250, y + 12), partida[:36], fill='#0F172A', font=font)
-            draw.text((560, y + 12), palpite[:25], fill='#0284C7', font=font)
-            draw.text((790, y + 12), odd, fill='#059669', font=font)
+            # Linha 3: Palpite e Odd
+            palpite = f"💡 Palpite: {jogo.get('palpite', '')}"
+            odd_str = f"Odd: {jogo.get('odd', '')}"
+            draw.text((margem + 20, y + 65), palpite, fill='#2563EB', font=font_normal)
+            draw.text((largura - margem - 180, y + 65), odd_str, fill='#059669', font=font_bold)
 
-            y += altura_linha_tabela
+            y += altura_card + espaco_card
 
         # Rodapé com ODD TOTAL
-        draw.rectangle([20, y, largura - 20, y + altura_rodape], fill='#0F172A')
-        draw.text((30, y + 20), "ODD TOTAL ACUMULADA:", fill='#FFFFFF', font=font)
-        draw.text((760, y + 20), f"{odd_total}", fill='#10B981', font=font)
+        draw.rectangle([margem, y, largura - margem, y + altura_footer], fill='#0F172A')
+        draw.text((margem + 20, y + 28), "🎯 ODD TOTAL ACUMULADA:", fill='#FFFFFF', font=font_titulo)
+        draw.text((largura - margem - 220, y + 28), f"{odd_total}", fill='#10B981', font=font_titulo)
 
         buffer = io.BytesIO()
         buffer.name = 'bilhete_futbet.png'
-        img.save(buffer, 'PNG')
+        img.save(buffer, 'PNG', quality=95)
         buffer.seek(0)
         return buffer
     except Exception as img_err:
-        print(f"⚠️ Erro ao desenhar imagem da tabela: {img_err}")
+        print(f"⚠️ Erro ao desenhar imagem: {img_err}")
         return None
 
 
@@ -178,23 +180,31 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
         TIPO: QUINTA_FEIRA
         TITULO: SUPER QUINTA - JOGOS CORRIDOS (ODD 400+)
         ODD_ALVO: 450.00
-        (Monte um bilhete especial acumulado com exatamente 12 a 15 jogos reais marcados para HOJE)
+        (Monte um bilhete especial com 12 a 15 jogos reais marcados para HOJE)
         JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
         ... (repita para até 15 jogos)
-        ODD_TOTAL: [Soma/Produto total ex: 485.50]
+        ODD_TOTAL: ~450.00
         === FIM BILHETE ===
         """
 
     return f"""
-    ATENÇÃO: HOJE É DIA {today_str}.
-    Você é o Tipster Oficial do FutBet. Monte bilhetes com jogos reais que acontecem EXCLUSIVAMENTE HOJE ({today_str}). Não inclua jogos de ontem ou de amanhã.
+    REGRA CRÍTICA E OBRIGATÓRIA: HOJE É DIA {today_str}.
+    Você é o Tipster Oficial do FutBet. Pesquise em plataformas em tempo real (como BetMines, Flashscore ou SofaScore) APENAS por jogos reais de futebol que acontecem EXCLUSIVAMENTE HOJE ({today_str}). NÃO utilize partidas de dias anteriores nem de dias futuros.
 
-    ESTRUTURA DE RESPOSTA OBRIGATÓRIA (Siga o formato exato com pipes |):
+    ESTRUTURA DE REDUÇÃO DE RISCO:
+    Para atingir a ODD total com MÁXIMA SEGURANÇA, inclua MAIS JOGOS (8 a 12 jogos por bilhete) com odds individuais BAIXAS e SEGURAS (entre 1.15 e 1.30, ex: Dupla Chance, Mais de 1.5 Golos, Vitoria Casa/Fora com proteção).
+
+    FORMATO OBRIGATÓRIO (Mantenha rigorosamente as barras verticais |):
 
     === INICIO BILHETE ===
     TIPO: NORMAL
     TITULO: BILHETE NORMAL 1 (ODD ~5.00)
     ODD_ALVO: 5.00
+    (Inclua de 8 a 10 jogos ultrasseguros de hoje com odds ~1.15 a 1.22)
+    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
@@ -206,11 +216,9 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     TIPO: NORMAL
     TITULO: BILHETE NORMAL 2 (ODD ~15.00)
     ODD_ALVO: 15.00
+    (Inclua de 9 a 11 jogos seguros de hoje com odds ~1.20 a 1.28)
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    ...
     ODD_TOTAL: ~15.00
     === FIM BILHETE ===
 
@@ -218,12 +226,9 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     TIPO: NORMAL
     TITULO: BILHETE NORMAL 3 (ODD ~50.00)
     ODD_ALVO: 50.00
+    (Inclua de 10 a 12 jogos seguros de hoje com odds ~1.25 a 1.35)
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    ...
     ODD_TOTAL: ~50.00
     === FIM BILHETE ===
 
@@ -231,13 +236,9 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     TIPO: NORMAL
     TITULO: BILHETE NORMAL 4 (ODD ~100.00)
     ODD_ALVO: 100.00
+    (Inclua de 10 a 12 jogos seguros de hoje)
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    ...
     ODD_TOTAL: ~100.00
     === FIM BILHETE ===
 
@@ -245,10 +246,9 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     TIPO: VIP
     TITULO: BILHETE VIP 1 (ODD ~10.00)
     ODD_ALVO: 10.00
+    (Inclua de 8 a 10 jogos de alta taxa de acerto de hoje)
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    ...
     ODD_TOTAL: ~10.00
     === FIM BILHETE ===
 
@@ -256,11 +256,9 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     TIPO: VIP
     TITULO: BILHETE VIP 2 (ODD ~40.00)
     ODD_ALVO: 40.00
+    (Inclua de 10 a 12 jogos de alta taxa de acerto de hoje)
     JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
+    ...
     ODD_TOTAL: ~40.00
     === FIM BILHETE ===
 
@@ -297,7 +295,7 @@ def extrair_e_processar_bilhetes(texto_gerado):
                         "liga": partes[1].strip(),
                         "jogo": partes[2].strip(),
                         "palpite": partes[3].strip(),
-                        "odd": partes[4].strip() if len(partes) > 4 else "1.30"
+                        "odd": partes[4].strip() if len(partes) > 4 else "1.20"
                     })
 
         if jogos:
@@ -312,12 +310,12 @@ def extrair_e_processar_bilhetes(texto_gerado):
 
 
 def enviar_bilhetes(chat_id, bilhetes, apenas_tipo=None):
-    """ Envia cada bilhete com a sua imagem em tabela e o resumo em texto """
+    """ Envia cada bilhete com a sua imagem estilizada em cartões e resumo em texto """
     for b in bilhetes:
         if apenas_tipo and b["tipo"] != apenas_tipo:
             continue
 
-        # Gerar Imagem Tabela
+        # Gerar Imagem em Cartões de Alta Visibilidade
         img_buffer = gerar_imagem_tabela(b["titulo"], b["jogos"], b["odd_total"])
         caption_txt = f"⚽ *FUTBET — {b['titulo']}*"
 
@@ -377,7 +375,7 @@ threading.Thread(target=agendador_diario, daemon=True).start()
 def send_welcome(message):
     text = (
         "⚽ *BEM-VINDO AO BOT FUTBET VIP!* 💎\n\n"
-        "Palpites diários com tabelas claras e visíveis dos jogos de HOJE.\n\n"
+        "Palpites diários em cartões claros e visíveis dos jogos de HOJE.\n\n"
         "📌 *Comandos Disponíveis:*\n"
         "👉 /palpites_normais — 4 Bilhetes Gratuitos (Odds 5, 15, 50, 100)\n"
         "👉 /palpites_vip — 2 Bilhetes VIP (Odds 10 e 40)\n"
@@ -392,7 +390,7 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['palpites_normais'])
 def send_normais(message):
-    enviar_mensagem_segura(message.chat.id, "📊 *A gerar os 4 Bilhetes Normais de Hoje (Odds 5, 15, 50, 100)... Aguarde.*")
+    enviar_mensagem_segura(message.chat.id, "📊 *A pesquisar jogos de HOJE e a gerar os 4 Bilhetes Normais... Aguarde.*")
     try:
         prompt = gerar_prompt_palpites()
         texto = chamar_gemini_com_fallback(prompt)
@@ -407,7 +405,7 @@ def send_normais(message):
 
 @bot.message_handler(commands=['palpites_vip'])
 def send_vip(message):
-    enviar_mensagem_segura(message.chat.id, "🔥 *A gerar os 2 Bilhetes VIP de Hoje (Odds 10 e 40)... Aguarde.*")
+    enviar_mensagem_segura(message.chat.id, "🔥 *A pesquisar jogos de HOJE e a gerar os 2 Bilhetes VIP (Odds 10 e 40)... Aguarde.*")
     try:
         prompt = gerar_prompt_palpites()
         texto = chamar_gemini_com_fallback(prompt)
@@ -439,7 +437,7 @@ def send_super_quinta(message):
 
 @bot.message_handler(commands=['palpites_hoje', 'palpites'])
 def send_todos(message):
-    enviar_mensagem_segura(message.chat.id, "⚽ *A analisar e desenhar as tabelas de TODOS os bilhetes do dia...*")
+    enviar_mensagem_segura(message.chat.id, "⚽ *A analisar partidas de HOJE e a desenhar os cartões de TODOS os bilhetes...*")
     try:
         prompt = gerar_prompt_palpites()
         texto = chamar_gemini_com_fallback(prompt)
@@ -520,4 +518,5 @@ if __name__ == "__main__":
             bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
         except Exception as e:
             print(f"⚠️ Instabilidade no polling: {e}. A reconectar em 5 segundos...")
-      
+            time.sleep(5)
+    
