@@ -104,5 +104,11 @@ def send_analise(message):
 # ==========================================
 if __name__ == "__main__":
     print("🤖 Bot FutBet VIP iniciado e pronto no Telegram!")
-    bot.infinity_polling()
+    try:
+        bot.remove_webhook()  # Limpa eventuais ligações antigas
+    except Exception as e:
+        print(f"Aviso ao remover webhook: {e}")
+        
+    bot.infinity_polling(skip_pending_updates=True)
+
     
