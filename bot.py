@@ -24,7 +24,6 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ==========================================
 # 2. CONFIGURAÇÃO DAS CHAVES E DO BOT
 # ==========================================
-# Utiliza o token das variáveis do Render ou este token novo como padrão:
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8874128452:AAExQzgiLh-_YskfkPtrlKm41og_NN0F5Aw")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
@@ -105,10 +104,9 @@ def send_analise(message):
 if __name__ == "__main__":
     print("🤖 Bot FutBet VIP iniciado e pronto no Telegram!")
     try:
-        bot.remove_webhook()  # Limpa eventuais ligações antigas
+        bot.remove_webhook()
     except Exception as e:
         print(f"Aviso ao remover webhook: {e}")
         
-    bot.infinity_polling(skip_pending_updates=True)
-
+    bot.infinity_polling(skip_pending=True)
     
