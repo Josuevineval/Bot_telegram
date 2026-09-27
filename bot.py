@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 from flask import Flask
 import telebot
@@ -24,11 +25,14 @@ threading.Thread(target=run_flask, daemon=True).start()
 # ==========================================
 # 2. CONFIGURAÇÃO DAS CHAVES E DO BOT
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8874128452:AAExQzgiLh-_YskfkPtrlKm41og_NN0F5Aw")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN não configurado nas variáveis de ambiente do Render!")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # ==========================================
@@ -67,11 +71,14 @@ def send_vip(message):
 
 @bot.message_handler(commands=['palpites_hoje'])
 def send_palpites(message):
+    if not client:
+        bot.reply_to(message, "❌ Erro: GEMINI_API_KEY não está configurada no Render.")
+        return
     bot.reply_to(message, "🔍 A pesquisar e a analisar os jogos de hoje com IA... Aguarde uns segundos.")
     try:
         prompt = "Forneça os melhores palpites de futebol para hoje com análises estatísticas sucintas, odds estimadas e nível de confiança."
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             contents=prompt,
         )
         bot.send_message(message.chat.id, response.text)
@@ -81,6 +88,9 @@ def send_palpites(message):
 
 @bot.message_handler(commands=['analisar'])
 def send_analise(message):
+    if not client:
+        bot.reply_to(message, "❌ Erro: GEMINI_API_KEY não está configurada no Render.")
+        return
     jogo = message.text.replace('/analisar', '').strip()
     if not jogo:
         bot.reply_to(message, "⚠️ Por favor, informe as equipas. Exemplo: `/analisar Benfica vs Porto`", parse_mode="Markdown")
@@ -90,7 +100,7 @@ def send_analise(message):
     try:
         prompt = f"Analise detalhadamente o jogo de futebol '{jogo}'. Forneça probabilidade de vitória, ambas marcam, golos esperados e sugestão de aposta."
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             contents=prompt,
         )
         bot.send_message(message.chat.id, response.text)
@@ -99,14 +109,22 @@ def send_analise(message):
 
 
 # ==========================================
-# 4. INICIAR O BOT NO TELEGRAM
+# 4. INICIAR O BOT COM TRATAMENTO DE ERROS
 # ==========================================
 if __name__ == "__main__":
-    print("🤖 Bot FutBet VIP iniciado e pronto no Telegram!")
+    print("🤖 A iniciar o Bot FutBet VIP...")
+    
     try:
         bot.remove_webhook()
     except Exception as e:
         print(f"Aviso ao remover webhook: {e}")
-        
-    bot.infinity_polling(skip_pending=True)
+
+    while True:
+        try:
+            print("🟢 Bot online e a escutar mensagens no Telegram!")
+            bot.infinity_polling(timeout=20, long_polling_timeout=20)
+        except Exception as e:
+            print(f"⚠️ Alerta/Conflito temporário: {e}")
+            print("⏳ A aguardar 10 segundos para estabilizar a ligação...")
+            time.sleep(10)
     
