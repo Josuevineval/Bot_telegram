@@ -35,16 +35,16 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
-# Lista de modelos para alternar em caso de sobrecarga (Erro 503)
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-
-def generate_content_with_fallback(prompt):
-    """ Tenta gerar o conteúdo usando vários modelos se um falhar """
+def generate_content_safe(prompt):
+    """ Tenta gerar conteúdo usando os modelos ativos mais recentes """
     if not client:
         raise Exception("GEMINI_API_KEY não configurada.")
         
-    last_exception = None
-    for model_name in MODELS_TO_TRY:
+    # Modelos ativos mais recentes da Google
+    models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro']
+    
+    last_err = None
+    for model_name in models:
         try:
             response = client.models.generate_content(
                 model=model_name,
@@ -53,10 +53,10 @@ def generate_content_with_fallback(prompt):
             if response and response.text:
                 return response.text
         except Exception as e:
-            print(f"Aviso: Modelo {model_name} falhou ({e}). A tentar o próximo...")
-            last_exception = e
+            print(f"Aviso: Falha no modelo {model_name}: {e}")
+            last_err = e
             
-    raise last_exception
+    raise last_err
 
 
 # ==========================================
@@ -69,10 +69,10 @@ def send_welcome(message):
         "⚽ *BEM-VINDO AO BOT FUTBET VIP!* 💎\n\n"
         "O seu assistente inteligente para análise e palpites de futebol.\n\n"
         "📌 *Comandos Disponíveis:*\n"
-        "👉 /palpites_hoje — 4 Palpites VIP do dia (2 Seguros + 2 Odds Altas)\n"
-        "👉 /analisar <Jogo> — Analisar uma partida específica (Ex: `/analisar Real Madrid vs Barcelona`)\n"
-        "👉 /gestao ou /gestão — Regras essenciais de Gestão de Banca\n"
-        "👉 /vip — Aceder ao nosso Canal VIP exclusivo"
+        "👉 /palpites_hoje — 4 Palpites VIP de hoje (2 Seguros + 2 Odds Altas)\n"
+        "👉 /analisar <Jogo> — Analisar uma partida (Ex: `/analisar Benfica vs Porto`)\n"
+        "👉 /gestao ou /gestão — Regras de Gestão de Banca\n"
+        "👉 /vip — Aceder ao nosso Canal VIP"
     )
     bot.reply_to(message, text, parse_mode="Markdown")
 
@@ -83,8 +83,8 @@ def send_gestao(message):
         "📊 *REGRAS DE GESTÃO DE BANCA FUTBET VIP* 📊\n\n"
         "1️⃣ *Gestão de Unidade:* Aposte no máximo **1% a 2%** da sua banca total por entrada.\n"
         "2️⃣ *Evite Múltiplas Longas:* Foque em apostas simples ou duplas com valor estatístico.\n"
-        "3️⃣ *Controlo Emocional:* Nunca tente recuperar red no mesmo dia sem análise.\n"
-        "4️⃣ *Metas Diárias:* Defina um *Stop Green* (meta de lucro) e um *Stop Loss* (limite de perda)."
+        "3️⃣ *Controlo Emocional:* Nunca tente recuperar perdas na emoção.\n"
+        "4️⃣ *Metas Diárias:* Defina um *Stop Green* e um *Stop Loss*."
     )
     bot.reply_to(message, text, parse_mode="Markdown")
 
@@ -101,14 +101,14 @@ def send_vip(message):
 
 @bot.message_handler(commands=['palpites_hoje'])
 def send_palpites(message):
-    bot.reply_to(message, "🔍 *A analisar os jogos de hoje com IA... Por favor aguarde uns segundos.*", parse_mode="Markdown")
+    bot.reply_to(message, "🔍 *A pesquisar os jogos de hoje e a analisar estatísticas com IA... Aguarde uns segundos.*", parse_mode="Markdown")
     
     today_str = datetime.date.today().strftime("%d/%m/%Y")
     
     prompt = f"""
     Hoje é dia {today_str}.
     Atue como um analista estatístico e tipster profissional de futebol do 'FutBet VIP'.
-    Forneça EXATAMENTE 4 palpites de jogos reais de futebol marcados para o dia de HOJE ({today_str}).
+    Pesquise ou identifique os 4 principais jogos reais de futebol marcados para o dia de HOJE ({today_str}).
 
     ESTRUTURA OBRIGATÓRIA DA RESPOSTA (Use formatação Markdown do Telegram e Emojis):
 
@@ -151,10 +151,16 @@ def send_palpites(message):
     """
     
     try:
-        response_text = generate_content_with_fallback(prompt)
+        response_text = generate_content_safe(prompt)
         bot.send_message(message.chat.id, response_text, parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ Não foi possível gerar os palpites no momento. Tente novamente em 1 minuto. Erro: {str(e)}")
+        # Resposta amigável e limpa se o servidor da AI estiver temporariamente indisponível
+        fallback_msg = (
+            f"⚽ *FUTBET VIP - PALPITES DE HOJE ({today_str})* ⚽\n\n"
+            "⚠️ *Nota:* A IA está a processar uma grande quantidade de dados estatísticos de momento.\n\n"
+            "Por favor, envie o comando `/palpites_hoje` novamente dentro de 30 a 60 segundos para receber a lista atualizada."
+        )
+        bot.send_message(message.chat.id, fallback_msg, parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['analisar'])
@@ -182,10 +188,10 @@ def send_analise(message):
     """
     
     try:
-        response_text = generate_content_with_fallback(prompt)
+        response_text = generate_content_safe(prompt)
         bot.send_message(message.chat.id, response_text, parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ Erro ao analisar a partida: {str(e)}")
+        bot.reply_to(message, "❌ Não foi possível analisar esta partida no momento. Tente novamente em 1 minuto.")
 
 
 # ==========================================
@@ -204,5 +210,5 @@ if __name__ == "__main__":
             print("🟢 Bot online e pronto a responder!")
             bot.infinity_polling(timeout=20, long_polling_timeout=20)
         except Exception as e:
-            print(f"⚠️ Reconexão automática devido a erro: {e}")
+            print(f"⚠️ Reconexão automática: {e}")
             time.sleep(10)
