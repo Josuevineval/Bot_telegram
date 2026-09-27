@@ -43,11 +43,12 @@ if not TELEGRAM_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
+# Modelos ativos suportados (corrige o erro 404 NOT_FOUND)
+MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.5-pro']
 
 def chamar_gemini_com_fallback(prompt):
     if not client:
-        raise Exception("GEMINI_API_KEY não configurada.")
+        raise Exception("GEMINI_API_KEY não está configurada no Render.")
         
     last_err = None
     for model in MODELS_TO_TRY:
@@ -59,14 +60,14 @@ def chamar_gemini_com_fallback(prompt):
             if response and response.text:
                 return response.text
         except Exception as e:
-            print(f"Aviso: Modelo {model} falhou: {e}. A tentar o próximo...")
+            print(f"Aviso: Modelo {model} falhou: {e}. A tentar o próximo modelo...")
             last_err = e
             
     raise last_err
 
 
 # ==========================================
-# 3. GERADOR DE IMAGEM DESIGNER VIP
+# 3. GERADOR DE IMAGEM DESIGNER VIP (PILLOW)
 # ==========================================
 def gerar_imagem_bilhete(texto_palpites):
     """ Converte o texto dos bilhetes numa imagem estilizada Dark Mode VIP """
@@ -75,13 +76,12 @@ def gerar_imagem_bilhete(texto_palpites):
 
     linhas = texto_palpites.strip().split('\n')
     
-    # Dimensões e espaçamentos
     largura = 900
     altura_linha = 26
     margem = 40
     altura = max(700, len(linhas) * altura_linha + margem * 2 + 60)
 
-    # Criar imagem com fundo Dark (#0F172A)
+    # Fundo Dark (#0F172A)
     img = Image.new('RGB', (largura, altura), color='#0F172A')
     draw = ImageDraw.Draw(img)
 
@@ -97,11 +97,10 @@ def gerar_imagem_bilhete(texto_palpites):
 
     for linha in linhas:
         if "FUTBET VIP" in linha:
-            continue  # Já desenhado no cabeçalho
+            continue
             
         cor = '#F3F4F6' # Branco padrão
         
-        # Colorir títulos e destaques
         if "BILHETE 1" in linha or "BILHETE 2" in linha:
             cor = '#10B981' # Verde
         elif "BILHETE 3" in linha:
@@ -111,12 +110,11 @@ def gerar_imagem_bilhete(texto_palpites):
         elif "ODD TOTAL" in linha:
             cor = '#FACC15' # Amarelo Dourado
         elif "━━━" in linha:
-            cor = '#475569' # Cinza para separadores
+            cor = '#475569' # Cinza
 
         draw.text((margem, y), linha, fill=cor, font=font)
         y += altura_linha
 
-    # Guardar imagem na memória
     buffer = io.BytesIO()
     buffer.name = 'bilhetes_futbet_vip.png'
     img.save(buffer, 'PNG')
@@ -187,12 +185,10 @@ def agendador_diario():
                     prompt = gerar_prompt_palpites()
                     texto = chamar_gemini_com_fallback(prompt)
                     
-                    # Tenta gerar imagem
                     imagem_buffer = gerar_imagem_bilhete(texto)
                     if imagem_buffer:
                         bot.send_photo(VIP_CHANNEL_ID, photo=imagem_buffer, caption="🔥 *BILHETES VIP DO DIA DISPONÍVEIS!*", parse_mode="Markdown")
                     
-                    # Envia o texto completo
                     bot.send_message(VIP_CHANNEL_ID, texto, parse_mode="Markdown")
                     print("✅ Bilhetes diários publicados com sucesso no Canal VIP!")
                 posted_today = True
@@ -216,7 +212,7 @@ def send_welcome(message):
         "O seu assistente inteligente para bilhetes e múltiplas de futebol.\n\n"
         "📌 *Comandos Disponíveis:*\n"
         "👉 /palpites_hoje — Gerar os 4 Bilhetes Múltiplos do dia em imagem e texto\n"
-        "👉 /analisar <Jogo> — Analisar uma partida individual\n"
+        "👉 /analisar <Jogo> — Analisar uma partida individual (Ex: `/analisar Benfica vs Porto`)\n"
         "👉 /gestao ou /gestão — Regras de Gestão de Banca\n"
         "👉 /vip — Preços e acesso ao Canal VIP"
     )
@@ -257,16 +253,50 @@ def send_palpites(message):
         prompt = gerar_prompt_palpites()
         texto = chamar_gemini_com_fallback(prompt)
         
-        # Gerar imagem estilizada
-        imagem_buffer = gerar_imagem_bilhete(texto)
-        if imagem_buffer:
-            bot.send_photo(message.chat.id, photo=imagem_buffer, caption="🖼️ *BILHETES DO DIA - FUTBET VIP*", parse_mode="Markdown")
-            
-        # Enviar texto pronto para copiar
+        # Tenta enviar a imagem gerada
+        try:
+            imagem_buffer = gerar_imagem_bilhete(texto)
+            if imagem_buffer:
+                bot.send_photo(message.chat.id, photo=imagem_buffer, caption="🖼️ *BILHETES DO DIA - FUTBET VIP*", parse_mode="Markdown")
+        except Exception as img_err:
+            print(f"Aviso ao gerar imagem: {img_err}")
+
+        # Envia o texto completo
         bot.send_message(message.chat.id, texto, parse_mode="Markdown")
     except Exception as e:
         print(f"Erro ao gerar palpites: {e}")
         bot.reply_to(message, f"❌ Erro ao comunicar com a IA: {str(e)}")
+
+
+@bot.message_handler(commands=['analisar'])
+def send_analise(message):
+    jogo = message.text.replace('/analisar', '').strip()
+    if not jogo:
+        bot.reply_to(message, "⚠️ *Por favor, indique as equipas.* Exemplo:\n`/analisar Benfica vs Porto`", parse_mode="Markdown")
+        return
+    
+    bot.reply_to(message, f"⚽ *A analisar a partida:* `{jogo}`...", parse_mode="Markdown")
+    
+    prompt = f"""
+    Analise o jogo de futebol '{jogo}' para apostas desportivas.
+    Forneça a análise formatada com emojis e Markdown do Telegram:
+    
+    📊 *ANÁLISE DETALHADA: {jogo}*
+    
+    🏆 Campeonato: [Nome]
+    📈 Probabilidade: [Casa X% | Empate X% | Fora X%]
+    ⚽ Média de Golos: [Ex: Mais de 2.5 golos]
+    💡 *Sugestão Principal:* [Mercado + Seleção]
+    📊 Odd Recomendada: [Ex: 1.75]
+    
+    📝 *Resumo:* [2 frases justificando a análise].
+    """
+    
+    try:
+        texto = chamar_gemini_com_fallback(prompt)
+        bot.send_message(message.chat.id, texto, parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Erro ao analisar a partida: {str(e)}")
 
 
 @bot.message_handler(commands=['postar_vip'])
@@ -280,9 +310,12 @@ def postar_vip_manual(message):
         prompt = gerar_prompt_palpites()
         texto = chamar_gemini_com_fallback(prompt)
         
-        imagem_buffer = gerar_imagem_bilhete(texto)
-        if imagem_buffer:
-            bot.send_photo(VIP_CHANNEL_ID, photo=imagem_buffer, caption="🔥 *BILHETES VIP DO DIA DISPONÍVEIS!*", parse_mode="Markdown")
+        try:
+            imagem_buffer = gerar_imagem_bilhete(texto)
+            if imagem_buffer:
+                bot.send_photo(VIP_CHANNEL_ID, photo=imagem_buffer, caption="🔥 *BILHETES VIP DO DIA DISPONÍVEIS!*", parse_mode="Markdown")
+        except Exception as img_err:
+            print(f"Aviso ao gerar imagem para o VIP: {img_err}")
             
         bot.send_message(VIP_CHANNEL_ID, texto, parse_mode="Markdown")
         bot.send_message(message.chat.id, "✅ *Bilhetes e Imagem publicados no Canal VIP com sucesso!*", parse_mode="Markdown")
@@ -294,7 +327,7 @@ def postar_vip_manual(message):
 # 6. EXECUÇÃO DO BOT
 # ==========================================
 if __name__ == "__main__":
-    print("🤖 A iniciar o Bot FutBet VIP...")
+    print("🤖 A iniciar o Bot FutBet VIP completo...")
     
     try:
         bot.remove_webhook()
