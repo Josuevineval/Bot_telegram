@@ -48,8 +48,35 @@ if not TELEGRAM_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Apenas o modelo exigido pela API
-MODELS_TO_TRY = ['gemini-3.8-flash']
+# Usar apenas modelos compatíveis com a cota gratuita de pesquisa
+MODELS_TO_TRY = ['gemini-2.0-flash', 'gemini-1.5-flash']
+
+def chamar_gemini_com_fallback(prompt):
+    """ Realiza a busca em tempo real respeitando os limites de taxa (RPM) """
+    if not client:
+        raise Exception("A variável GEMINI_API_KEY não está configurada.")
+        
+    last_err = None
+    for model in MODELS_TO_TRY:
+        try:
+            config_busca = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+            
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=config_busca
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_err = e
+            print(f"⚠️ Aviso no modelo '{model}': {e}. Aguardando 5 segundos...")
+            time.sleep(5)  # Pausa essencial para não estourar a cota por minuto
+            
+    raise Exception(f"Erro na IA: {last_err}")
+
 
 # ==========================================
 # 3. MÓDULO INTELIGENTE COM PESQUISA EM TEMPO REAL
