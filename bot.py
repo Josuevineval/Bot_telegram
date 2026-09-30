@@ -63,7 +63,6 @@ CACHE_DIARIO = {
 def chamar_gemini_com_fallback_profissional(prompt):
     """
     Executa chamadas à API do Gemini com:
-    - Prioridade aos modelos Gemini 3.x mais recentes
     - Descoberta dinâmica de modelos para prevenir erros 404
     - Fallback em cadeia para garantir disponibilidade
     - Pausas progressivas para prevenir erros 429
@@ -86,7 +85,6 @@ def chamar_gemini_com_fallback_profissional(prompt):
     modelos_fallback_estatico = [
         'gemini-3.5-pro',            # Modelo Pro topo de gama atual
         'gemini-3.5-flash-lite',     # Modelo recomendado oficialmente para velocidade e cota
-        'gemini-3.1-pro-preview',    # Versão Pro avançada
         'gemini-2.5-flash'           # Backup adicional de alta estabilidade
     ]
     
