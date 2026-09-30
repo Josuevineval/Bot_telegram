@@ -48,11 +48,15 @@ if not TELEGRAM_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Lista com 3 modelos ativos na API do Gemini para fallback
-MODELS_TO_TRY = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+# Lista de modelos atualizados e ativos na API do Gemini
+MODELS_TO_TRY = [
+    'gemini-3.5-flash-lite', # Modelo recomendado na mensagem da API
+    'gemini-2.5-flash',      # Modelo rápido para fallback
+    'gemini-2.5-pro'         # Modelo avançado
+]
 
 def chamar_gemini_com_fallback(prompt):
-    """ Chama a API do Gemini testando os 3 modelos em sequência com busca na web """
+    """ Chama a API do Gemini testando os modelos ativos com busca na web """
     if not client:
         raise Exception("A variável GEMINI_API_KEY não está configurada no Render.")
         
@@ -76,6 +80,7 @@ def chamar_gemini_com_fallback(prompt):
             time.sleep(2)
             
     raise Exception(f"Erro na IA: {last_err}")
+
 
 
 
