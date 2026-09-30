@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot FutBet VIP 100% Operacional (Arquitetura Anti-Falhas Ativa)"
+    return "Bot FutBet VIP 100% Operacional (Gemini 3.x Anti-Silêncio Ativo)"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -49,22 +49,24 @@ if not TELEGRAM_TOKEN:
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-# Cache em memória para armazenar os palpites gerados no dia (Previne Erro 429)
+# Cache em memória para armazenar os palpites e o texto bruto do dia
 CACHE_DIARIO = {
     "data": None,
-    "bilhetes": []
+    "bilhetes": [],
+    "texto_raw": None
 }
 
 
 # ==========================================
-# 3. ENGINE ANTI-ERRO DA IA (ANTI-404 E ANTI-429)
+# 3. ENGINE ANTI-ERRO DA IA (MODELOS GEMINI 3.X E FALLBACK)
 # ==========================================
 def chamar_gemini_com_fallback_profissional(prompt):
     """
     Executa chamadas à API do Gemini com:
-    - Descoberta dinâmica de modelos para prevenir erros 404 (Not Found)
+    - Prioridade aos modelos Gemini 3.x mais recentes
+    - Descoberta dinâmica de modelos para prevenir erros 404
     - Fallback em cadeia para garantir disponibilidade
-    - Pausas progressivas para prevenir erros 429 (Rate Limits)
+    - Pausas progressivas para prevenir erros 429
     """
     if not client:
         raise Exception("A variável GEMINI_API_KEY não está configurada no Render.")
@@ -75,18 +77,17 @@ def chamar_gemini_com_fallback_profissional(prompt):
         lista_api = client.models.list()
         for m in lista_api:
             nome = m.name.replace("models/", "")
-            # Prioriza modelos otimizados para texto/busca
-            if ("flash" in nome or "pro" in nome) and "vision" not in nome:
+            if ("flash" in nome or "pro" in nome or "3.5" in nome or "3.1" in nome) and "vision" not in nome:
                 modelos_candidatos.append(nome)
     except Exception as err_list:
         print(f"⚠️ Não foi possível listar modelos automaticamente: {err_list}")
 
-    # 2. Modelos padrão de reserva caso a listagem falhe
+    # 2. Lista estática de modelos Gemini mais recentes (Servidores 3.x e 2.x)
     modelos_fallback_estatico = [
-        'gemini-2.5-flash', 
-        'gemini-2.0-flash', 
-        'gemini-3.1-pro-preview',
-        'gemini-1.5-flash'
+        'gemini-3.5-pro',            # Modelo Pro topo de gama atual
+        'gemini-3.5-flash-lite',     # Modelo recomendado oficialmente para velocidade e cota
+        'gemini-3.1-pro-preview',    # Versão Pro avançada
+        'gemini-2.5-flash'           # Backup adicional de alta estabilidade
     ]
     
     for m in modelos_fallback_estatico:
@@ -95,7 +96,7 @@ def chamar_gemini_com_fallback_profissional(prompt):
 
     ultimo_erro = None
 
-    # 3. Iteração resiliente sobre os modelos disponíveis
+    # 3. Execução resiliente pelos modelos candidatos
     for model_name in modelos_candidatos:
         print(f"🔄 A testar o modelo: {model_name}...")
         
@@ -119,19 +120,17 @@ def chamar_gemini_com_fallback_profissional(prompt):
                 err_str = str(e)
                 ultimo_erro = e
                 
-                # Se for erro 404 (Modelo descontinuado/Inexistente), salta IMEDIATAMENTE para o próximo
                 if "404" in err_str or "NOTFOUND" in err_str or "no longer available" in err_str:
-                    print(f"❌ Modelo '{model_name}' indisponível (404). A mudar de modelo...")
+                    print(f"❌ Modelo '{model_name}' indisponível (404). A saltar para o próximo...")
                     break 
 
-                # Se for erro 429 (Limite de requisições), faz pausa de arrefecimento
                 elif "429" in err_str or "RESOURCEEXHAUSTED" in err_str:
-                    tempo_espera = 12 * (tentativa + 1)
+                    tempo_espera = 10 * (tentativa + 1)
                     print(f"⚠️ Cota atingida (429) em '{model_name}'. A aguardar {tempo_espera}s...")
                     time.sleep(tempo_espera)
                 else:
-                    print(f"⚠️ Erro no modelo '{model_name}': {e}")
-                    time.sleep(3)
+                    print(f"⚠️️ Erro no modelo '{model_name}': {e}")
+                    time.sleep(2)
 
     raise Exception(f"Não foi possível obter resposta da IA. Detalhe do último erro: {ultimo_erro}")
 
@@ -142,7 +141,6 @@ def enviar_mensagem_segura(chat_id, texto, reply_to_id=None):
         return bot.send_message(chat_id, texto, parse_mode="Markdown", reply_to_message_id=reply_to_id)
     except Exception:
         try:
-            # Remove caracteres especiais se a formatação falhar
             texto_limpo = texto.replace('*', '').replace('_', '').replace('`', '')
             return bot.send_message(chat_id, texto_limpo, reply_to_message_id=reply_to_id)
         except Exception as e2:
@@ -260,24 +258,6 @@ def gerar_prompt_palpites(incluir_super_quinta=False):
     === FIM BILHETE ===
 
     === INICIO BILHETE ===
-    TIPO: NORMAL
-    TITULO: BILHETE NORMAL 3 (ODD ~50.00)
-    ODD_ALVO: 50.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (10 a 12 jogos)
-    ODD_TOTAL: ~50.00
-    === FIM BILHETE ===
-
-    === INICIO BILHETE ===
-    TIPO: NORMAL
-    TITULO: BILHETE NORMAL 4 (ODD ~100.00)
-    ODD_ALVO: 100.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (10 a 12 jogos)
-    ODD_TOTAL: ~100.00
-    === FIM BILHETE ===
-
-    === INICIO BILHETE ===
     TIPO: VIP
     TITULO: BILHETE VIP 1 (ODD ~10.00)
     ODD_ALVO: 10.00
@@ -345,48 +325,59 @@ def obter_ou_gerar_bilhetes_diarios():
     """ Garante consulta única à API por dia, utilizando cache em memória """
     hoje = datetime.date.today().strftime("%Y-%m-%d")
     
-    # Se já foram gerados bilhetes hoje, reutiliza a informação do cache
-    if CACHE_DIARIO["data"] == hoje and CACHE_DIARIO["bilhetes"]:
-        return CACHE_DIARIO["bilhetes"]
+    if CACHE_DIARIO["data"] == hoje and (CACHE_DIARIO["bilhetes"] or CACHE_DIARIO["texto_raw"]):
+        return CACHE_DIARIO["bilhetes"], CACHE_DIARIO["texto_raw"]
 
     is_quinta = (datetime.date.today().weekday() == 3)
     prompt = gerar_prompt_palpites(incluir_super_quinta=is_quinta)
     texto = chamar_gemini_com_fallback_profissional(prompt)
     bilhetes = extrair_e_processar_bilhetes(texto)
 
+    CACHE_DIARIO["data"] = hoje
+    CACHE_DIARIO["bilhetes"] = bilhetes
+    CACHE_DIARIO["texto_raw"] = texto
+
+    return bilhetes, texto
+
+
+def enviar_bilhetes(chat_id, bilhetes, raw_text=None, apenas_tipo=None):
+    """ Transmite os bilhetes formatados em imagem e texto. Se o parser falhar, envia o texto direto para EVITAR SILÊNCIO. """
+    enviados = 0
     if bilhetes:
-        CACHE_DIARIO["data"] = hoje
-        CACHE_DIARIO["bilhetes"] = bilhetes
+        for b in bilhetes:
+            if apenas_tipo and b["tipo"] != apenas_tipo:
+                continue
 
-    return bilhetes
+            enviados += 1
+            img_buffer = gerar_imagem_tabela(b["titulo"], b["jogos"], b["odd_total"])
+            caption_txt = f"⚽ *FUTBET — {b['titulo']}*"
 
+            if img_buffer:
+                try:
+                    bot.send_photo(chat_id, photo=img_buffer, caption=caption_txt, parse_mode="Markdown")
+                except Exception as e_img:
+                    print(f"⚠️ Erro envio imagem: {e_img}")
+                    try:
+                        bot.send_photo(chat_id, photo=img_buffer, caption=f"⚽ FUTBET — {b['titulo']}")
+                    except Exception:
+                        pass
 
-def enviar_bilhetes(chat_id, bilhetes, apenas_tipo=None):
-    """ Transmite os bilhetes formatados em imagem e texto """
-    for b in bilhetes:
-        if apenas_tipo and b["tipo"] != apenas_tipo:
-            continue
-
-        img_buffer = gerar_imagem_tabela(b["titulo"], b["jogos"], b["odd_total"])
-        caption_txt = f"⚽ *FUTBET — {b['titulo']}*"
-
-        if img_buffer:
-            try:
-                bot.send_photo(chat_id, photo=img_buffer, caption=caption_txt, parse_mode="Markdown")
-            except Exception:
-                bot.send_photo(chat_id, photo=img_buffer, caption=f"⚽ FUTBET — {b['titulo']}")
-
-        texto_detalhes = f"📋 *{b['titulo']}*\n"
-        texto_detalhes += f"🗓️ *Data:* {datetime.date.today().strftime('%d/%m/%Y')} (Jogos de Hoje)\n\n"
-        
-        for idx, j in enumerate(b["jogos"], 1):
-            texto_detalhes += f"{idx}. ⏰ *{j['hora']}* [{j['liga']}]\n"
-            texto_detalhes += f"   🏟️ {j['jogo']} ➔ *{j['palpite']}* (Odd {j['odd']})\n"
+            texto_detalhes = f"📋 *{b['titulo']}*\n"
+            texto_detalhes += f"🗓️ *Data:* {datetime.date.today().strftime('%d/%m/%Y')} (Jogos de Hoje)\n\n"
             
-        texto_detalhes += f"\n🎯 *ODD TOTAL:* `{b['odd_total']}`"
-        
-        enviar_mensagem_segura(chat_id, texto_detalhes)
-        time.sleep(1)
+            for idx, j in enumerate(b["jogos"], 1):
+                texto_detalhes += f"{idx}. ⏰ *{j['hora']}* [{j['liga']}]\n"
+                texto_detalhes += f"   🏟️ {j['jogo']} ➔ *{j['palpite']}* (Odd {j['odd']})\n"
+                
+            texto_detalhes += f"\n🎯 *ODD TOTAL:* `{b['odd_total']}`"
+            
+            enviar_mensagem_segura(chat_id, texto_detalhes)
+            time.sleep(1)
+
+    # ANTI-SILÊNCIO: Se o parser não encontrou bilhetes no formato estrito, envia o texto bruto gerado pela IA
+    if enviados == 0 and raw_text:
+        print("⚠️ Parser de bilhetes estruturados não encontrou correspondência. Enviando resposta direta em texto...")
+        enviar_mensagem_segura(chat_id, raw_text)
 
 
 # ==========================================
@@ -400,18 +391,18 @@ def rotina_postagem_diaria():
             if agora.hour == 8 and agora.minute == 0 and not posted_today:
                 print("⏰ A iniciar postagem automática diária...")
                 
-                bilhetes = obter_ou_gerar_bilhetes_diarios()
+                bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
                 
-                if FREE_CHANNEL_ID and bilhetes:
+                if FREE_CHANNEL_ID:
                     print("📢 A enviar bilhetes Normais para o Canal Grátis...")
-                    enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, apenas_tipo="NORMAL")
+                    enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
 
-                if VIP_CHANNEL_ID and bilhetes:
+                if VIP_CHANNEL_ID:
                     print("💎 A enviar bilhetes VIP para o Canal VIP...")
-                    enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, apenas_tipo="VIP")
+                    enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
                     
                     if agora.weekday() == 3:
-                        enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, apenas_tipo="QUINTA_FEIRA")
+                        enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="QUINTA_FEIRA")
 
                 posted_today = True
                 print("✅ Postagens diárias concluídas!")
@@ -435,8 +426,9 @@ def send_welcome(message):
         "Os palpites são enviados automaticamente todos os dias às 08:00 para os canais.\n\n"
         "📌 *Comandos Disponíveis:*\n"
         "👉 /palpites_normais ou /palpites_hoje — Ver bilhetes normais de hoje\n"
-        "👉 /palpites_vip — Ver bilhetes VIP de hoje\n"
+        "👉 /palpites_vip ou /vip — Ver bilhetes VIP de hoje\n"
         "👉 /super_quinta — Ver bilhete de Quinta-Feira\n"
+        "👉 /analisar TimeA vs TimeB — Analisar jogo específico\n"
         "👉 /forcar_postagem — Postar nos canais agora mesmo (Admin)"
     )
     enviar_mensagem_segura(message.chat.id, text, reply_to_id=message.message_id)
@@ -444,73 +436,86 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['palpites_normais', 'palpites_hoje'])
 def send_normais(message):
-    enviar_mensagem_segura(message.chat.id, "📊 *A carregar os Bilhetes Normais de Hoje...*")
+    msg_wait = bot.reply_to(message, "📊 *A carregar os Bilhetes Normais de Hoje...*", parse_mode="Markdown")
     try:
-        bilhetes = obter_ou_gerar_bilhetes_diarios()
-        if bilhetes:
-            enviar_bilhetes(message.chat.id, bilhetes, apenas_tipo="NORMAL")
-        else:
-            enviar_mensagem_segura(message.chat.id, "⚠️ Não foi possível obter os palpites de momento.")
+        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
+        enviar_bilhetes(message.chat.id, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
     except Exception as e:
         enviar_mensagem_segura(message.chat.id, f"❌ Erro ao obter palpites: {e}")
+    finally:
+        try:
+            bot.delete_message(message.chat.id, msg_wait.message_id)
+        except Exception:
+            pass
 
 
-@bot.message_handler(commands=['palpites_vip'])
+@bot.message_handler(commands=['palpites_vip', 'vip'])
 def send_vip(message):
-    enviar_mensagem_segura(message.chat.id, "🔥 *A carregar os Bilhetes VIP de Hoje...*")
+    msg_wait = bot.reply_to(message, "🔥 *A carregar os Bilhetes VIP de Hoje...*", parse_mode="Markdown")
     try:
-        bilhetes = obter_ou_gerar_bilhetes_diarios()
-        if bilhetes:
-            enviar_bilhetes(message.chat.id, bilhetes, apenas_tipo="VIP")
-        else:
-            enviar_mensagem_segura(message.chat.id, "⚠️ Não foi possível obter os palpites no momento.")
+        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
+        enviar_bilhetes(message.chat.id, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
     except Exception as e:
         enviar_mensagem_segura(message.chat.id, f"❌ Erro ao obter palpites VIP: {e}")
+    finally:
+        try:
+            bot.delete_message(message.chat.id, msg_wait.message_id)
+        except Exception:
+            pass
 
 
 @bot.message_handler(commands=['super_quinta'])
 def send_super_quinta(message):
-    enviar_mensagem_segura(message.chat.id, "🚀 *A carregar o Bilhete da Super Quinta (Odd 400+)...*")
+    msg_wait = bot.reply_to(message, "🚀 *A carregar o Bilhete da Super Quinta...*", parse_mode="Markdown")
     try:
-        bilhetes = obter_ou_gerar_bilhetes_diarios()
+        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
         bilhetes_quinta = [b for b in bilhetes if b["tipo"] == "QUINTA_FEIRA"]
         if bilhetes_quinta:
-            enviar_bilhetes(message.chat.id, bilhetes_quinta)
+            enviar_bilhetes(message.chat.id, bilhetes_quinta, raw_text=raw_text)
         else:
-            enviar_mensagem_segura(message.chat.id, "⚠️ O bilhete da Super Quinta está disponível apenas às quintas-feiras.")
+            enviar_mensagem_segura(message.chat.id, "⚠️ O bilhete da Super Quinta está disponível apenas às quintas-feiras ou quando gerado.")
     except Exception as e:
         enviar_mensagem_segura(message.chat.id, f"❌ Erro: {e}")
+    finally:
+        try:
+            bot.delete_message(message.chat.id, msg_wait.message_id)
+        except Exception:
+            pass
+
+
+@bot.message_handler(commands=['analisar'])
+def cmd_analisar(message):
+    partida = message.text.replace('/analisar', '').strip()
+    if not partida:
+        enviar_mensagem_segura(message.chat.id, "⚠️ Por favor, especifique o jogo. Exemplo:\n`/analisar Dinamarca vs Portugal`")
+        return
+
+    msg_wait = bot.reply_to(message, f"⚽ *A pesquisar dados ao vivo para:* {partida}...", parse_mode="Markdown")
+    try:
+        prompt = f"Pesquise dados ao vivo na internet sobre a partida de futebol: {partida}. Forneça momento recente dos times, desfalques importantes e uma sugestão clara de palpite com Odd estimada. Formate com emojis para Telegram."
+        resposta = chamar_gemini_com_fallback_profissional(prompt)
+        enviar_mensagem_segura(message.chat.id, resposta)
+    except Exception as e:
+        enviar_mensagem_segura(message.chat.id, f"❌ Erro na análise: {e}")
+    finally:
+        try:
+            bot.delete_message(message.chat.id, msg_wait.message_id)
+        except Exception:
+            pass
 
 
 @bot.message_handler(commands=['forcar_postagem'])
 def force_post(message):
     enviar_mensagem_segura(message.chat.id, "⚙️ *A iniciar envio imediato para os canais Grátis e VIP...*")
     try:
-        bilhetes = obter_ou_gerar_bilhetes_diarios()
+        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
         if FREE_CHANNEL_ID:
-            enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, apenas_tipo="NORMAL")
+            enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
         if VIP_CHANNEL_ID:
-            enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, apenas_tipo="VIP")
+            enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
         enviar_mensagem_segura(message.chat.id, "✅ Postagem forçada concluída com sucesso!")
     except Exception as e:
         enviar_mensagem_segura(message.chat.id, f"❌ Erro ao forçar postagem: {e}")
 
 
-# ==========================================
-# 8. LOOP DE EXECUÇÃO RESILIENTE (ZERO DOWNTIME)
-# ==========================================
-if __name__ == "__main__":
-    print("🤖 Bot FutBet VIP rodando com arquitetura anti-falhas...")
-    try:
-        bot.remove_webhook(drop_pending_updates=True)
-        time.sleep(1)
-    except Exception as e:
-        print(f"Aviso webhook: {e}")
-
-    while True:
-        try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
-        except Exception as e:
-            print(f"⚠️ Reconexão automática do bot: {e}")
-            time.sleep(5)
-    
+# =======
