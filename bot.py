@@ -25,7 +25,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot FutBet VIP 100% Operacional (Gemini 3.x Anti-Silêncio Ativo)"
+    return "Bot FutBet VIP 100% Operacional (Anti-Crash Ativo)"
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
@@ -58,79 +58,49 @@ CACHE_DIARIO = {
 
 
 # ==========================================
-# 3. ENGINE ANTI-ERRO DA IA (MODELOS GEMINI 3.X E FALLBACK)
+# 3. ENGINE RESILIENTE DA IA (MODELOS ESTÁVEIS + TIMEOUT)
 # ==========================================
 def chamar_gemini_com_fallback_profissional(prompt):
     """
-    Executa chamadas à API do Gemini com:
-    - Descoberta dinâmica de modelos para prevenir erros 404
-    - Fallback em cadeia para garantir disponibilidade
-    - Pausas progressivas para prevenir erros 429
+    Executa chamadas à API do Gemini utilizando exclusivamente modelos oficiais ativos.
     """
     if not client:
         raise Exception("A variável GEMINI_API_KEY não está configurada no Render.")
 
-    # 1. Tenta obter a lista de modelos ativos diretamente da API do Google
-    modelos_candidatos = []
-    try:
-        lista_api = client.models.list()
-        for m in lista_api:
-            nome = m.name.replace("models/", "")
-            if ("flash" in nome or "pro" in nome or "3.5" in nome or "3.1" in nome) and "vision" not in nome:
-                modelos_candidatos.append(nome)
-    except Exception as err_list:
-        print(f"⚠️ Não foi possível listar modelos automaticamente: {err_list}")
-
-    # 2. Lista estática de modelos Gemini mais recentes (Servidores 3.x e 2.x)
-    modelos_fallback_estatico = [
-        'gemini-3.5-pro',            # Modelo Pro topo de gama atual
-        'gemini-3.5-flash-lite',     # Modelo recomendado oficialmente para velocidade e cota
-        'gemini-2.5-flash'           # Backup adicional de alta estabilidade
+    # Lista de modelos oficiais e estáveis suportados pela Google GenAI
+    modelos_candidatos = [
+        'gemini-2.5-flash',
+        'gemini-2.5-pro',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro'
     ]
-    
-    for m in modelos_fallback_estatico:
-        if m not in modelos_candidatos:
-            modelos_candidatos.append(m)
 
     ultimo_erro = None
 
-    # 3. Execução resiliente pelos modelos candidatos
     for model_name in modelos_candidatos:
-        print(f"🔄 A testar o modelo: {model_name}...")
-        
-        for tentativa in range(2):
-            try:
-                config_busca = types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
-                )
-                
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=config_busca
-                )
-                
-                if response and response.text:
-                    print(f"✅ Sucesso com o modelo: {model_name}")
-                    return response.text
+        print(f"🔄 A tentar gerar palpites com o modelo: {model_name}...")
+        try:
+            config_busca = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
+            
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config_busca
+            )
+            
+            if response and response.text:
+                print(f"✅ Sucesso com o modelo: {model_name}")
+                return response.text
 
-            except Exception as e:
-                err_str = str(e)
-                ultimo_erro = e
-                
-                if "404" in err_str or "NOTFOUND" in err_str or "no longer available" in err_str:
-                    print(f"❌ Modelo '{model_name}' indisponível (404). A saltar para o próximo...")
-                    break 
+        except Exception as e:
+            err_str = str(e)
+            ultimo_erro = e
+            print(f"⚠️ Erro no modelo '{model_name}': {err_str}")
+            time.sleep(2)
 
-                elif "429" in err_str or "RESOURCEEXHAUSTED" in err_str:
-                    tempo_espera = 10 * (tentativa + 1)
-                    print(f"⚠️ Cota atingida (429) em '{model_name}'. A aguardar {tempo_espera}s...")
-                    time.sleep(tempo_espera)
-                else:
-                    print(f"⚠️️ Erro no modelo '{model_name}': {e}")
-                    time.sleep(2)
-
-    raise Exception(f"Não foi possível obter resposta da IA. Detalhe do último erro: {ultimo_erro}")
+    raise Exception(f"Falha na API da IA. Verifique a GEMINI_API_KEY. Detalhes: {ultimo_erro}")
 
 
 def enviar_mensagem_segura(chat_id, texto, reply_to_id=None):
@@ -208,7 +178,7 @@ def gerar_imagem_tabela(titulo, jogos, odd_total):
         buffer.seek(0)
         return buffer
     except Exception as img_err:
-        print(f"⚠️ Erro ao gerar imagem do bilhete: {img_err}")
+        print(f"⚠️️ Erro ao gerar imagem do bilhete: {img_err}")
         return None
 
 
@@ -339,7 +309,7 @@ def obter_ou_gerar_bilhetes_diarios():
 
 
 def enviar_bilhetes(chat_id, bilhetes, raw_text=None, apenas_tipo=None):
-    """ Transmite os bilhetes formatados em imagem e texto. Se o parser falhar, envia o texto direto para EVITAR SILÊNCIO. """
+    """ Transmite os bilhetes formatados. Se a estruturação falhar, envia o texto direto para nunca ficar em silêncio. """
     enviados = 0
     if bilhetes:
         for b in bilhetes:
@@ -354,11 +324,7 @@ def enviar_bilhetes(chat_id, bilhetes, raw_text=None, apenas_tipo=None):
                 try:
                     bot.send_photo(chat_id, photo=img_buffer, caption=caption_txt, parse_mode="Markdown")
                 except Exception as e_img:
-                    print(f"⚠️ Erro envio imagem: {e_img}")
-                    try:
-                        bot.send_photo(chat_id, photo=img_buffer, caption=f"⚽ FUTBET — {b['titulo']}")
-                    except Exception:
-                        pass
+                    print(f"⚠️ Erro no envio da imagem: {e_img}")
 
             texto_detalhes = f"📋 *{b['titulo']}*\n"
             texto_detalhes += f"🗓️ *Data:* {datetime.date.today().strftime('%d/%m/%Y')} (Jogos de Hoje)\n\n"
@@ -372,9 +338,8 @@ def enviar_bilhetes(chat_id, bilhetes, raw_text=None, apenas_tipo=None):
             enviar_mensagem_segura(chat_id, texto_detalhes)
             time.sleep(1)
 
-    # ANTI-SILÊNCIO: Se o parser não encontrou bilhetes no formato estrito, envia o texto bruto gerado pela IA
+    # ANTI-SILÊNCIO: Se não houver bilhetes estruturados, envia o texto direto da IA
     if enviados == 0 and raw_text:
-        print("⚠️ Parser de bilhetes estruturados não encontrou correspondência. Enviando resposta direta em texto...")
         enviar_mensagem_segura(chat_id, raw_text)
 
 
@@ -392,13 +357,10 @@ def rotina_postagem_diaria():
                 bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
                 
                 if FREE_CHANNEL_ID:
-                    print("📢 A enviar bilhetes Normais para o Canal Grátis...")
                     enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
 
                 if VIP_CHANNEL_ID:
-                    print("💎 A enviar bilhetes VIP para o Canal VIP...")
                     enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
-                    
                     if agora.weekday() == 3:
                         enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="QUINTA_FEIRA")
 
@@ -485,12 +447,12 @@ def send_super_quinta(message):
 def cmd_analisar(message):
     partida = message.text.replace('/analisar', '').strip()
     if not partida:
-        enviar_mensagem_segura(message.chat.id, "⚠️ Por favor, especifique o jogo. Exemplo:\n`/analisar Dinamarca vs Portugal`")
+        enviar_mensagem_segura(message.chat.id, "⚠️ Por favor, especifique o jogo. Exemplo:\n`/analisar Benfica vs Porto`")
         return
 
     msg_wait = bot.reply_to(message, f"⚽ *A pesquisar dados ao vivo para:* {partida}...", parse_mode="Markdown")
     try:
-        prompt = f"Pesquise dados ao vivo na internet sobre a partida de futebol: {partida}. Forneça momento recente dos times, desfalques importantes e uma sugestão clara de palpite com Odd estimada. Formate com emojis para Telegram."
+        prompt = f"Pesquise dados ao vivo na internet sobre a partida de futebol: {partida}. Forneça momento recente dos times, desfalques importantes e uma sugestão clara de palpite com Odd estimada."
         resposta = chamar_gemini_com_fallback_profissional(prompt)
         enviar_mensagem_segura(message.chat.id, resposta)
     except Exception as e:
@@ -516,4 +478,20 @@ def force_post(message):
         enviar_mensagem_segura(message.chat.id, f"❌ Erro ao forçar postagem: {e}")
 
 
-# =======
+# ==========================================
+# 8. LOOP RESILIENTE
+# ==========================================
+if __name__ == "__main__":
+    print("🤖 Bot FutBet VIP operacional...")
+    try:
+        bot.remove_webhook(drop_pending_updates=True)
+        time.sleep(1)
+    except Exception as e:
+        print(f"Aviso webhook: {e}")
+
+    while True:
+        try:
+            bot.polling(non_stop=True, timeout=30, long_polling_timeout=30)
+        except Exception as e:
+            print(f"⚠️ Reconexão do bot em 5 segundos: {e}")
+            time.sleep(5)
