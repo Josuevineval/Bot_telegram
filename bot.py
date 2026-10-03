@@ -1,497 +1,517 @@
-import os
-import time
 import datetime
-import threading
+import html
 import io
-import sys
+import logging
+import os
 import re
-from flask import Flask
+import sys
+import threading
+import time
+from zoneinfo import ZoneInfo
+
 import telebot
+from flask import Flask
 from google import genai
 from google.genai import types
 
-# Tenta importar Pillow para gerar as imagens dos bilhetes
 try:
     from PIL import Image, ImageDraw, ImageFont
     HAS_PILLOW = True
 except ImportError:
     HAS_PILLOW = False
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("futbet")
+
 
 # ==========================================
-# 1. SERVIDOR FLASK (HEALTH CHECK PARA O RENDER)
+# 1. CONFIGURAÇÃO
+# ==========================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+FREE_CHANNEL_ID = os.environ.get("FREE_CHANNEL_ID")   # ex: -1001234567890
+VIP_CHANNEL_ID = os.environ.get("VIP_CHANNEL_ID")     # ex: -1009876543210
+ADMIN_IDS = {int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
+
+BOT_TZ = ZoneInfo(os.environ.get("BOT_TZ", "Europe/Lisbon"))   # fuso horário do bot
+POST_HOUR = int(os.environ.get("POST_HOUR", "8"))              # hora da postagem diária
+
+# gemini-1.5-* foi descontinuado (causa do erro 404). Pode sobrescrever via variável GEMINI_MODELS.
+MODELS_TO_TRY = [
+    m.strip() for m in os.environ.get(
+        "GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite,gemini-2.0-flash"
+    ).split(",") if m.strip()
+]
+
+if not TELEGRAM_TOKEN:
+    log.critical("TELEGRAM_TOKEN não configurado!")
+    sys.exit(1)
+
+bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="HTML")
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+AVISO = "🔞 +18 | Aposte com responsabilidade. Não há garantia de lucro."
+
+# Definição dos bilhetes: (tipo, título, odd alvo, mín jogos, máx jogos, odd mín/jogo, odd máx/jogo)
+BILHETES_CONFIG = [
+    ("NORMAL", "BILHETE NORMAL 1", 5,   5, 7,   1.15, 1.45),
+    ("NORMAL", "BILHETE NORMAL 2", 15,  7, 9,   1.20, 1.50),
+    ("NORMAL", "BILHETE NORMAL 3", 50,  9, 11,  1.25, 1.55),
+    ("NORMAL", "BILHETE NORMAL 4", 100, 10, 12, 1.30, 1.60),
+    ("VIP",    "BILHETE VIP 1",    10,  6, 8,   1.20, 1.50),
+    ("VIP",    "BILHETE VIP 2",    40,  8, 10,  1.30, 1.60),
+]
+QUINTA_CONFIG = ("QUINTA_FEIRA", "SUPER QUINTA", 450, 12, 15, 1.35, 1.65)
+
+CACHE = {"data": None, "bilhetes": []}
+CACHE_LOCK = threading.Lock()
+
+
+def agora():
+    return datetime.datetime.now(BOT_TZ)
+
+
+# ==========================================
+# 2. SERVIDOR WEB (RENDER)
 # ==========================================
 app = Flask(__name__)
 
-@app.route('/')
+
+@app.route("/")
 def home():
-    return "Bot FutBet VIP 100% Operacional (Anti-Crash Ativo)"
+    return "FutBet VIP Bot online ✅"
+
+
+@app.route("/health")
+def health():
+    return {"status": "ok", "cache_date": CACHE["data"], "bilhetes": len(CACHE["bilhetes"])}
+
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
+
 
 threading.Thread(target=run_flask, daemon=True).start()
 
 
 # ==========================================
-# 2. CONFIGURAÇÃO DE VARIÁVEIS DE AMBIENTE
+# 3. MÓDULO DE IA (GEMINI + GOOGLE SEARCH)
 # ==========================================
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-FREE_CHANNEL_ID = os.environ.get("FREE_CHANNEL_ID")
-VIP_CHANNEL_ID = os.environ.get("VIP_CHANNEL_ID")
-
-if not TELEGRAM_TOKEN:
-    print("❌ ERRO CRÍTICO: TELEGRAM_TOKEN não configurado!")
-    sys.exit(1)
-
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-# Cache em memória para armazenar os palpites e o texto bruto do dia
-CACHE_DIARIO = {
-    "data": None,
-    "bilhetes": [],
-    "texto_raw": None
-}
+SYSTEM_INSTRUCTION = (
+    "És um analista profissional de apostas desportivas em futebol. "
+    "Usas a pesquisa Google para confirmar jogos REAIS e odds de mercado atuais. "
+    "Nunca inventas jogos, horários ou ligas. Se não houver jogos suficientes, "
+    "montas bilhetes menores em vez de inventar. Respondes SOMENTE no formato pedido, "
+    "sem comentários, sem markdown e sem texto fora dos blocos."
+)
 
 
-# ==========================================
-# 3. ENGINE RESILIENTE DA IA (MODELOS ESTÁVEIS + TIMEOUT)
-# ==========================================
-def chamar_gemini_com_fallback_profissional(prompt):
-    """
-    Executa chamadas à API do Gemini utilizando exclusivamente modelos oficiais ativos.
-    """
+def chamar_gemini(prompt):
     if not client:
-        raise Exception("A variável GEMINI_API_KEY não está configurada no Render.")
+        raise RuntimeError("GEMINI_API_KEY não está configurada.")
 
-    # Lista de modelos oficiais e estáveis suportados pela Google GenAI
-    modelos_candidatos = [
-        'gemini-2.5-flash',
-        'gemini-2.5-pro',
-        'gemini-1.5-flash',
-        'gemini-1.5-pro'
-    ]
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        temperature=0.3,
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+    )
 
     ultimo_erro = None
-
-    for model_name in modelos_candidatos:
-        print(f"🔄 A tentar gerar palpites com o modelo: {model_name}...")
-        try:
-            config_busca = types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
-            
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=config_busca
-            )
-            
-            if response and response.text:
-                print(f"✅ Sucesso com o modelo: {model_name}")
-                return response.text
-
-        except Exception as e:
-            err_str = str(e)
-            ultimo_erro = e
-            print(f"⚠️ Erro no modelo '{model_name}': {err_str}")
-            time.sleep(2)
-
-    raise Exception(f"Falha na API da IA. Verifique a GEMINI_API_KEY. Detalhes: {ultimo_erro}")
-
-
-def enviar_mensagem_segura(chat_id, texto, reply_to_id=None):
-    """ Envia mensagens com fallback para texto simples caso o Markdown falhe """
-    try:
-        return bot.send_message(chat_id, texto, parse_mode="Markdown", reply_to_message_id=reply_to_id)
-    except Exception:
-        try:
-            texto_limpo = texto.replace('*', '').replace('_', '').replace('`', '')
-            return bot.send_message(chat_id, texto_limpo, reply_to_message_id=reply_to_id)
-        except Exception as e2:
-            print(f"❌ Erro ao enviar mensagem para {chat_id}: {e2}")
-            return None
+    for model in MODELS_TO_TRY:
+        for tentativa in range(1, 3):
+            try:
+                resp = client.models.generate_content(model=model, contents=prompt, config=config)
+                texto = getattr(resp, "text", None)
+                if texto:
+                    log.info("Resposta obtida com o modelo %s", model)
+                    return texto
+                ultimo_erro = f"{model}: resposta vazia"
+            except Exception as e:  # noqa: BLE001
+                ultimo_erro = f"{model}: {e}"
+                msg = str(e)
+                log.warning("Tentativa %d (%s) falhou: %s", tentativa, model, msg[:200])
+                if "404" in msg or "NOT_FOUND" in msg:
+                    break  # modelo inexistente/descontinuado → próximo modelo
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    time.sleep(8)
+                    break
+                if "API key" in msg or "401" in msg or "403" in msg or "PERMISSION" in msg:
+                    raise RuntimeError(f"Chave Gemini inválida ou sem permissão: {msg[:200]}")
+                time.sleep(3)
+    raise RuntimeError(f"Todos os modelos falharam. Último erro: {ultimo_erro}")
 
 
 # ==========================================
-# 4. GERADOR DE IMAGENS EM CARTÕES VISÍVEIS
+# 4. PROMPT E PARSER
 # ==========================================
-def gerar_imagem_tabela(titulo, jogos, odd_total):
-    if not HAS_PILLOW:
-        return None
-
-    try:
-        largura = 1000
-        
-        try:
-            font_titulo = ImageFont.load_default(size=28)
-            font_bold = ImageFont.load_default(size=22)
-            font_normal = ImageFont.load_default(size=20)
-            font_sub = ImageFont.load_default(size=18)
-        except TypeError:
-            font_titulo = font_bold = font_normal = font_sub = ImageFont.load_default()
-
-        altura_header = 100
-        altura_card = 95
-        espaco_card = 14
-        altura_footer = 90
-        margem = 30
-
-        num_jogos = len(jogos)
-        altura_total = altura_header + (num_jogos * (altura_card + espaco_card)) + altura_footer + 40
-
-        img = Image.new('RGB', (largura, altura_total), color='#F1F5F9')
-        draw = ImageDraw.Draw(img)
-
-        draw.rectangle([margem, 20, largura - margem, altura_header], fill='#0F172A')
-        titulo_limpo = titulo.replace('*', '').replace('_', '').replace('`', '').upper()
-        draw.text((margem + 20, 35), f"⚽ FUTBET — {titulo_limpo}", fill='#F59E0B', font=font_titulo)
-
-        y = altura_header + 20
-
-        for idx, jogo in enumerate(jogos):
-            draw.rectangle([margem, y, largura - margem, y + altura_card], fill='#FFFFFF', outline='#CBD5E1', width=2)
-            
-            hora_liga = f"⏰ {jogo.get('hora', '')}   |   🏆 {jogo.get('liga', '')}"
-            draw.text((margem + 20, y + 12), hora_liga, fill='#64748B', font=font_sub)
-
-            partida = f"⚔️  {jogo.get('jogo', '')}"
-            draw.text((margem + 20, y + 38), partida, fill='#0F172A', font=font_bold)
-
-            palpite = f"💡 Palpite: {jogo.get('palpite', '')}"
-            odd_str = f"Odd: {jogo.get('odd', '')}"
-            draw.text((margem + 20, y + 65), palpite, fill='#2563EB', font=font_normal)
-            draw.text((largura - margem - 180, y + 65), odd_str, fill='#059669', font=font_bold)
-
-            y += altura_card + espaco_card
-
-        draw.rectangle([margem, y, largura - margem, y + altura_footer], fill='#0F172A')
-        draw.text((margem + 20, y + 28), "🎯 ODD TOTAL ACUMULADA:", fill='#FFFFFF', font=font_titulo)
-        draw.text((largura - margem - 220, y + 28), f"{odd_total}", fill='#10B981', font=font_titulo)
-
-        buffer = io.BytesIO()
-        buffer.name = 'bilhete_futbet.png'
-        img.save(buffer, 'PNG', quality=95)
-        buffer.seek(0)
-        return buffer
-    except Exception as img_err:
-        print(f"⚠️️ Erro ao gerar imagem do bilhete: {img_err}")
-        return None
+def _bloco_prompt(cfg):
+    tipo, titulo, alvo, jmin, jmax, omin, omax = cfg
+    return (
+        f"=== INICIO BILHETE ===\n"
+        f"TIPO: {tipo}\n"
+        f"TITULO: {titulo} (ODD ~{alvo})\n"
+        f"# Meta: odd total próxima de {alvo}, com {jmin} a {jmax} jogos, "
+        f"odd por jogo entre {omin:.2f} e {omax:.2f}\n"
+        f"JOGO: HH:MM | Liga | Time Casa vs Time Fora | Palpite | Odd\n"
+        f"(uma linha JOGO por partida)\n"
+        f"=== FIM BILHETE ==="
+    )
 
 
-# ==========================================
-# 5. GERADOR E PARSER DE PROMPTS
-# ==========================================
-def gerar_prompt_palpites(incluir_super_quinta=False):
-    today_str = datetime.date.today().strftime("%d/%m/%Y")
-    
-    instrucao_quinta = ""
-    if incluir_super_quinta:
-        instrucao_quinta = """
-        === INICIO BILHETE ===
-        TIPO: QUINTA_FEIRA
-        TITULO: SUPER QUINTA - JOGOS CORRIDOS (ODD 400+)
-        ODD_ALVO: 450.00
-        JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-        ...
-        ODD_TOTAL: ~450.00
-        === FIM BILHETE ===
-        """
+def gerar_prompt(incluir_quinta=False):
+    hoje = agora().strftime("%d/%m/%Y")
+    configs = list(BILHETES_CONFIG) + ([QUINTA_CONFIG] if incluir_quinta else [])
+    blocos = "\n\n".join(_bloco_prompt(c) for c in configs)
 
     return f"""
-    SITUAÇÃO: HOJE É DIA {today_str}.
-    Consulte a internet (FlashScore, BetMines, SofaScore) para obter partidas oficiais EXCLUSIVAMENTE de HOJE ({today_str}).
+DATA DE HOJE: {hoje} (fuso {BOT_TZ.key}).
 
-    ESTRUTURA DOS BILHETES:
+TAREFA: pesquise na internet (FlashScore, SofaScore, BetMines, sites de odds) os jogos de futebol
+OFICIAIS que acontecem EXCLUSIVAMENTE hoje, {hoje}, e monte os bilhetes abaixo.
 
-    === INICIO BILHETE ===
-    TIPO: NORMAL
-    TITULO: BILHETE NORMAL 1 (ODD ~5.00)
-    ODD_ALVO: 5.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (8 a 10 jogos)
-    ODD_TOTAL: ~5.00
-    === FIM BILHETE ===
+REGRAS OBRIGATÓRIAS:
+1. Somente jogos de HOJE que ainda não começaram, com horário no fuso {BOT_TZ.key}.
+2. Priorize mercados seguros: Dupla Chance, Mais de 1.5 gols, Empate Anula, Ambas Não Marcam em favoritos claros.
+3. Nunca repita o mesmo jogo dentro do mesmo bilhete. Evite repetir o mesmo jogo em muitos bilhetes.
+4. A odd do campo "Odd" deve ser decimal com ponto (ex: 1.25) e refletir o mercado real.
+5. Não escreva ODD_TOTAL (o sistema calcula). Não escreva nada fora dos blocos.
+6. Linhas que começam com # são instruções internas: NÃO as repita na resposta.
+7. Use exatamente o formato abaixo, um bloco por bilhete.
 
-    === INICIO BILHETE ===
-    TIPO: NORMAL
-    TITULO: BILHETE NORMAL 2 (ODD ~15.00)
-    ODD_ALVO: 15.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (8 a 10 jogos)
-    ODD_TOTAL: ~15.00
-    === FIM BILHETE ===
-
-    === INICIO BILHETE ===
-    TIPO: VIP
-    TITULO: BILHETE VIP 1 (ODD ~10.00)
-    ODD_ALVO: 10.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (8 a 10 jogos)
-    ODD_TOTAL: ~10.00
-    === FIM BILHETE ===
-
-    === INICIO BILHETE ===
-    TIPO: VIP
-    TITULO: BILHETE VIP 2 (ODD ~40.00)
-    ODD_ALVO: 40.00
-    JOGO: [HH:MM] | [Liga] | [Casa vs Fora] | [Palpite] | [Odd]
-    ... (10 a 12 jogos)
-    ODD_TOTAL: ~40.00
-    === FIM BILHETE ===
-
-    {instrucao_quinta}
-    """
+{blocos}
+""".strip()
 
 
-def extrair_e_processar_bilhetes(texto_gerado):
-    padrao = r"=== INICIO BILHETE ===(.*?)=== FIM BILHETE ==="
-    blocos = re.findall(padrao, texto_gerado, re.DOTALL)
-    
+def _parse_odd(txt):
+    m = re.search(r"\d+[.,]?\d*", txt or "")
+    if not m:
+        return None
+    try:
+        v = float(m.group(0).replace(",", "."))
+        return v if v > 1.0 else None
+    except ValueError:
+        return None
+
+
+def extrair_bilhetes(texto):
+    blocos = re.findall(r"=== INICIO BILHETE ===(.*?)=== FIM BILHETE ===", texto, re.DOTALL)
     bilhetes = []
     for bloco in blocos:
-        linhas = [l.strip() for l in bloco.strip().split('\n') if l.strip()]
-        
-        tipo = "NORMAL"
-        titulo = "BILHETE FUTBET"
-        odd_total = "1.00"
-        jogos = []
-
-        for linha in linhas:
-            if linha.startswith("TIPO:"):
-                tipo = linha.replace("TIPO:", "").strip()
-            elif linha.startswith("TITULO:"):
-                titulo = linha.replace("TITULO:", "").strip()
-            elif linha.startswith("ODD_TOTAL:"):
-                odd_total = linha.replace("ODD_TOTAL:", "").strip()
-            elif linha.startswith("JOGO:"):
-                partes = linha.replace("JOGO:", "").split('|')
-                if len(partes) >= 4:
-                    jogos.append({
-                        "hora": partes[0].strip(),
-                        "liga": partes[1].strip(),
-                        "jogo": partes[2].strip(),
-                        "palpite": partes[3].strip(),
-                        "odd": partes[4].strip() if len(partes) > 4 else "1.20"
-                    })
-
+        tipo, titulo, jogos = "NORMAL", "BILHETE FUTBET", []
+        vistos = set()
+        for linha in (l.strip() for l in bloco.splitlines() if l.strip()):
+            up = linha.upper()
+            if up.startswith("TIPO:"):
+                tipo = linha.split(":", 1)[1].strip().upper()
+            elif up.startswith("TITULO:"):
+                titulo = linha.split(":", 1)[1].strip()
+            elif up.startswith("JOGO:"):
+                partes = [p.strip() for p in linha.split(":", 1)[1].split("|")]
+                if len(partes) < 5:
+                    continue
+                odd = _parse_odd(partes[4])
+                chave = partes[2].lower()
+                if odd is None or chave in vistos:
+                    continue
+                vistos.add(chave)
+                jogos.append({"hora": partes[0], "liga": partes[1], "jogo": partes[2],
+                              "palpite": partes[3], "odd": odd})
         if jogos:
-            bilhetes.append({
-                "tipo": tipo,
-                "titulo": titulo,
-                "odd_total": odd_total,
-                "jogos": jogos
-            })
-            
+            total = 1.0
+            for j in jogos:
+                total *= j["odd"]
+            bilhetes.append({"tipo": tipo, "titulo": titulo, "jogos": jogos, "odd_total": round(total, 2)})
     return bilhetes
 
 
-def obter_ou_gerar_bilhetes_diarios():
-    """ Garante consulta única à API por dia, utilizando cache em memória """
-    hoje = datetime.date.today().strftime("%Y-%m-%d")
-    
-    if CACHE_DIARIO["data"] == hoje and (CACHE_DIARIO["bilhetes"] or CACHE_DIARIO["texto_raw"]):
-        return CACHE_DIARIO["bilhetes"], CACHE_DIARIO["texto_raw"]
+def obter_bilhetes(forcar=False):
+    """Gera 1x por dia (thread-safe) e reutiliza do cache."""
+    with CACHE_LOCK:
+        hoje = agora().strftime("%Y-%m-%d")
+        if not forcar and CACHE["data"] == hoje and CACHE["bilhetes"]:
+            return CACHE["bilhetes"]
 
-    is_quinta = (datetime.date.today().weekday() == 3)
-    prompt = gerar_prompt_palpites(incluir_super_quinta=is_quinta)
-    texto = chamar_gemini_com_fallback_profissional(prompt)
-    bilhetes = extrair_e_processar_bilhetes(texto)
-
-    CACHE_DIARIO["data"] = hoje
-    CACHE_DIARIO["bilhetes"] = bilhetes
-    CACHE_DIARIO["texto_raw"] = texto
-
-    return bilhetes, texto
+        is_quinta = agora().weekday() == 3
+        texto = chamar_gemini(gerar_prompt(incluir_quinta=is_quinta))
+        bilhetes = extrair_bilhetes(texto)
+        if bilhetes:
+            CACHE["data"], CACHE["bilhetes"] = hoje, bilhetes
+        else:
+            log.warning("Resposta da IA sem bilhetes válidos:\n%s", texto[:500])
+        return bilhetes
 
 
-def enviar_bilhetes(chat_id, bilhetes, raw_text=None, apenas_tipo=None):
-    """ Transmite os bilhetes formatados. Se a estruturação falhar, envia o texto direto para nunca ficar em silêncio. """
+# ==========================================
+# 5. IMAGEM DO BILHETE
+# ==========================================
+def _fonte(tamanho, negrito=False):
+    caminhos = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if negrito else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "DejaVuSans-Bold.ttf" if negrito else "DejaVuSans.ttf",
+    ]
+    for c in caminhos:
+        try:
+            return ImageFont.truetype(c, tamanho)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=tamanho)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _cortar(draw, texto, fonte, largura_max):
+    while texto and draw.textlength(texto, font=fonte) > largura_max:
+        texto = texto[:-2]
+        if len(texto) < 4:
+            break
+    return texto
+
+
+def gerar_imagem(titulo, jogos, odd_total):
+    if not HAS_PILLOW:
+        return None
+    try:
+        W, margem = 1000, 30
+        h_head, h_card, gap, h_foot = 100, 100, 14, 90
+        H = h_head + len(jogos) * (h_card + gap) + h_foot + 50
+
+        img = Image.new("RGB", (W, H), "#F1F5F9")
+        d = ImageDraw.Draw(img)
+        f_tit, f_b, f_n, f_s = _fonte(28, True), _fonte(22, True), _fonte(20), _fonte(18)
+
+        d.rectangle([margem, 20, W - margem, h_head], fill="#0F172A")
+        d.text((margem + 20, 45), _cortar(d, f"FUTBET  |  {titulo.upper()}", f_tit, W - 2 * margem - 40),
+               fill="#F59E0B", font=f_tit)
+
+        y = h_head + 20
+        for j in jogos:
+            d.rectangle([margem, y, W - margem, y + h_card], fill="#FFFFFF", outline="#CBD5E1", width=2)
+            d.text((margem + 20, y + 10), _cortar(d, f"{j['hora']}  |  {j['liga']}", f_s, W - 2 * margem - 40),
+                   fill="#64748B", font=f_s)
+            d.text((margem + 20, y + 36), _cortar(d, j["jogo"], f_b, W - 2 * margem - 40), fill="#0F172A", font=f_b)
+            d.text((margem + 20, y + 66), _cortar(d, f"Palpite: {j['palpite']}", f_n, 640), fill="#2563EB", font=f_n)
+            d.text((W - margem - 190, y + 66), f"Odd {j['odd']:.2f}", fill="#059669", font=f_b)
+            y += h_card + gap
+
+        d.rectangle([margem, y, W - margem, y + h_foot], fill="#0F172A")
+        d.text((margem + 20, y + 30), "ODD TOTAL ACUMULADA", fill="#FFFFFF", font=f_tit)
+        d.text((W - margem - 230, y + 30), f"{odd_total:,.2f}", fill="#10B981", font=f_tit)
+
+        buf = io.BytesIO()
+        buf.name = "bilhete_futbet.png"
+        img.save(buf, "PNG")
+        buf.seek(0)
+        return buf
+    except Exception as e:  # noqa: BLE001
+        log.error("Erro ao gerar imagem: %s", e)
+        return None
+
+
+# ==========================================
+# 6. ENVIO DE MENSAGENS
+# ==========================================
+def esc(x):
+    return html.escape(str(x))
+
+
+def enviar_texto(chat_id, texto, reply_to=None):
+    """Divide em partes ≤ 3800 caracteres (limite do Telegram = 4096)."""
+    partes, atual = [], ""
+    for linha in texto.split("\n"):
+        if len(atual) + len(linha) + 1 > 3800:
+            partes.append(atual)
+            atual = ""
+        atual += linha + "\n"
+    if atual.strip():
+        partes.append(atual)
+
+    ultima = None
+    for i, p in enumerate(partes):
+        try:
+            ultima = bot.send_message(chat_id, p, reply_to_message_id=reply_to if i == 0 else None)
+        except Exception:  # noqa: BLE001
+            try:
+                ultima = bot.send_message(chat_id, re.sub(r"<[^>]+>", "", p), parse_mode=None)
+            except Exception as e2:  # noqa: BLE001
+                log.error("Falha ao enviar para %s: %s", chat_id, e2)
+    return ultima
+
+
+def enviar_bilhetes(chat_id, bilhetes, tipo=None):
     enviados = 0
-    if bilhetes:
-        for b in bilhetes:
-            if apenas_tipo and b["tipo"] != apenas_tipo:
-                continue
+    for b in bilhetes:
+        if tipo and b["tipo"] != tipo:
+            continue
+        enviados += 1
 
-            enviados += 1
-            img_buffer = gerar_imagem_tabela(b["titulo"], b["jogos"], b["odd_total"])
-            caption_txt = f"⚽ *FUTBET — {b['titulo']}*"
+        img = gerar_imagem(b["titulo"], b["jogos"], b["odd_total"])
+        if img:
+            try:
+                bot.send_photo(chat_id, img, caption=f"⚽ <b>FUTBET — {esc(b['titulo'])}</b>")
+            except Exception as e:  # noqa: BLE001
+                log.warning("Falha ao enviar foto: %s", e)
 
-            if img_buffer:
-                try:
-                    bot.send_photo(chat_id, photo=img_buffer, caption=caption_txt, parse_mode="Markdown")
-                except Exception as e_img:
-                    print(f"⚠️ Erro no envio da imagem: {e_img}")
-
-            texto_detalhes = f"📋 *{b['titulo']}*\n"
-            texto_detalhes += f"🗓️ *Data:* {datetime.date.today().strftime('%d/%m/%Y')} (Jogos de Hoje)\n\n"
-            
-            for idx, j in enumerate(b["jogos"], 1):
-                texto_detalhes += f"{idx}. ⏰ *{j['hora']}* [{j['liga']}]\n"
-                texto_detalhes += f"   🏟️ {j['jogo']} ➔ *{j['palpite']}* (Odd {j['odd']})\n"
-                
-            texto_detalhes += f"\n🎯 *ODD TOTAL:* `{b['odd_total']}`"
-            
-            enviar_mensagem_segura(chat_id, texto_detalhes)
-            time.sleep(1)
-
-    # ANTI-SILÊNCIO: Se não houver bilhetes estruturados, envia o texto direto da IA
-    if enviados == 0 and raw_text:
-        enviar_mensagem_segura(chat_id, raw_text)
+        linhas = [f"📋 <b>{esc(b['titulo'])}</b>",
+                  f"🗓️ {agora().strftime('%d/%m/%Y')} — jogos de hoje\n"]
+        for i, j in enumerate(b["jogos"], 1):
+            linhas.append(f"{i}. ⏰ <b>{esc(j['hora'])}</b> · {esc(j['liga'])}")
+            linhas.append(f"   🏟️ {esc(j['jogo'])} ➔ <b>{esc(j['palpite'])}</b> (Odd {j['odd']:.2f})")
+        linhas.append(f"\n🎯 <b>ODD TOTAL:</b> <code>{b['odd_total']:,.2f}</code>")
+        linhas.append(f"\n{AVISO}")
+        enviar_texto(chat_id, "\n".join(linhas))
+        time.sleep(1)
+    return enviados
 
 
 # ==========================================
-# 6. AGENDADOR DIÁRIO AUTOMÁTICO (08:00 AM)
+# 7. AGENDADOR DIÁRIO
 # ==========================================
-def rotina_postagem_diaria():
-    posted_today = False
+def postar_nos_canais():
+    bilhetes = obter_bilhetes()
+    if not bilhetes:
+        raise RuntimeError("A IA não devolveu bilhetes válidos.")
+    if FREE_CHANNEL_ID:
+        enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, "NORMAL")
+    if VIP_CHANNEL_ID:
+        enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, "VIP")
+        if agora().weekday() == 3:
+            enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, "QUINTA_FEIRA")
+
+
+def rotina_diaria():
+    ultimo_post = None
+    proxima_tentativa = 0.0
     while True:
         try:
-            agora = datetime.datetime.now()
-            if agora.hour == 8 and agora.minute == 0 and not posted_today:
-                print("⏰ A iniciar postagem automática diária...")
-                
-                bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
-                
-                if FREE_CHANNEL_ID:
-                    enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
-
-                if VIP_CHANNEL_ID:
-                    enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
-                    if agora.weekday() == 3:
-                        enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="QUINTA_FEIRA")
-
-                posted_today = True
-                print("✅ Postagens diárias concluídas!")
-            elif agora.hour != 8:
-                posted_today = False
-        except Exception as e:
-            print(f"⚠️ Erro na rotina diária: {e}")
+            n = agora()
+            if n.hour == POST_HOUR and ultimo_post != n.date() and time.time() >= proxima_tentativa:
+                log.info("Iniciando postagem diária automática...")
+                try:
+                    postar_nos_canais()
+                    ultimo_post = n.date()
+                    log.info("Postagem diária concluída.")
+                except Exception as e:  # noqa: BLE001
+                    log.error("Falha na postagem diária: %s", e)
+                    proxima_tentativa = time.time() + 300  # tenta de novo em 5 min
+        except Exception as e:  # noqa: BLE001
+            log.error("Erro no agendador: %s", e)
         time.sleep(30)
 
-threading.Thread(target=rotina_postagem_diaria, daemon=True).start()
+
+threading.Thread(target=rotina_diaria, daemon=True).start()
 
 
 # ==========================================
-# 7. COMANDOS DO TELEGRAM
+# 8. COMANDOS
 # ==========================================
-
-@bot.message_handler(commands=['start', 'ajuda', 'help'])
-def send_welcome(message):
-    text = (
-        "⚽ *BOT FUTBET VIP OPERACIONAL!* 💎\n\n"
-        "Os palpites são enviados automaticamente todos os dias às 08:00 para os canais.\n\n"
-        "📌 *Comandos Disponíveis:*\n"
-        "👉 /palpites_normais ou /palpites_hoje — Ver bilhetes normais de hoje\n"
-        "👉 /palpites_vip ou /vip — Ver bilhetes VIP de hoje\n"
-        "👉 /super_quinta — Ver bilhete de Quinta-Feira\n"
-        "👉 /analisar TimeA vs TimeB — Analisar jogo específico\n"
-        "👉 /forcar_postagem — Postar nos canais agora mesmo (Admin)"
-    )
-    enviar_mensagem_segura(message.chat.id, text, reply_to_id=message.message_id)
+def is_admin(message):
+    return message.from_user and message.from_user.id in ADMIN_IDS
 
 
-@bot.message_handler(commands=['palpites_normais', 'palpites_hoje'])
-def send_normais(message):
-    msg_wait = bot.reply_to(message, "📊 *A carregar os Bilhetes Normais de Hoje...*", parse_mode="Markdown")
+def pode_ver_vip(message):
+    # Se ADMIN_IDS estiver definido, o VIP em chat privado é restrito aos admins.
+    return not ADMIN_IDS or is_admin(message)
+
+
+def entregar(message, tipo, rotulo):
+    bot.send_chat_action(message.chat.id, "typing")
+    enviar_texto(message.chat.id, f"📊 <b>A carregar {rotulo}...</b>")
     try:
-        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
-        enviar_bilhetes(message.chat.id, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
-    except Exception as e:
-        enviar_mensagem_segura(message.chat.id, f"❌ Erro ao obter palpites: {e}")
-    finally:
-        try:
-            bot.delete_message(message.chat.id, msg_wait.message_id)
-        except Exception:
-            pass
+        bilhetes = obter_bilhetes()
+        if not bilhetes or enviar_bilhetes(message.chat.id, bilhetes, tipo) == 0:
+            enviar_texto(message.chat.id, "⚠️ Nenhum bilhete disponível para esta categoria hoje.")
+    except Exception as e:  # noqa: BLE001
+        log.error("Erro em /%s: %s", message.text, e)
+        enviar_texto(message.chat.id, "❌ Não foi possível gerar os palpites agora. Tente novamente em alguns minutos.")
+        for admin in ADMIN_IDS:
+            try:
+                bot.send_message(admin, f"⚠️ Erro técnico: {esc(str(e)[:500])}", parse_mode="HTML")
+            except Exception:  # noqa: BLE001
+                pass
 
 
-@bot.message_handler(commands=['palpites_vip', 'vip'])
-def send_vip(message):
-    msg_wait = bot.reply_to(message, "🔥 *A carregar os Bilhetes VIP de Hoje...*", parse_mode="Markdown")
-    try:
-        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
-        enviar_bilhetes(message.chat.id, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
-    except Exception as e:
-        enviar_mensagem_segura(message.chat.id, f"❌ Erro ao obter palpites VIP: {e}")
-    finally:
-        try:
-            bot.delete_message(message.chat.id, msg_wait.message_id)
-        except Exception:
-            pass
+@bot.message_handler(commands=["start", "ajuda", "help"])
+def cmd_start(m):
+    enviar_texto(m.chat.id, (
+        "⚽ <b>FUTBET VIP — BOT OFICIAL</b> 💎\n\n"
+        f"Palpites automáticos todos os dias às {POST_HOUR:02d}:00 nos nossos canais.\n\n"
+        "📌 <b>Comandos:</b>\n"
+        "/palpites_hoje — Bilhetes normais de hoje\n"
+        "/palpites_vip — Bilhetes VIP de hoje\n"
+        "/super_quinta — Super Quinta (só às quintas)\n"
+        "/status — Estado do bot\n\n"
+        f"{AVISO}"
+    ), reply_to=m.message_id)
 
 
-@bot.message_handler(commands=['super_quinta'])
-def send_super_quinta(message):
-    msg_wait = bot.reply_to(message, "🚀 *A carregar o Bilhete da Super Quinta...*", parse_mode="Markdown")
-    try:
-        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
-        bilhetes_quinta = [b for b in bilhetes if b["tipo"] == "QUINTA_FEIRA"]
-        if bilhetes_quinta:
-            enviar_bilhetes(message.chat.id, bilhetes_quinta, raw_text=raw_text)
-        else:
-            enviar_mensagem_segura(message.chat.id, "⚠️ O bilhete da Super Quinta está disponível apenas às quintas-feiras ou quando gerado.")
-    except Exception as e:
-        enviar_mensagem_segura(message.chat.id, f"❌ Erro: {e}")
-    finally:
-        try:
-            bot.delete_message(message.chat.id, msg_wait.message_id)
-        except Exception:
-            pass
+@bot.message_handler(commands=["palpites_hoje", "palpites_normais"])
+def cmd_normais(m):
+    entregar(m, "NORMAL", "os Bilhetes Normais de hoje")
 
 
-@bot.message_handler(commands=['analisar'])
-def cmd_analisar(message):
-    partida = message.text.replace('/analisar', '').strip()
-    if not partida:
-        enviar_mensagem_segura(message.chat.id, "⚠️ Por favor, especifique o jogo. Exemplo:\n`/analisar Benfica vs Porto`")
+@bot.message_handler(commands=["palpites_vip", "palpitesvip"])
+def cmd_vip(m):
+    if not pode_ver_vip(m):
+        enviar_texto(m.chat.id, "💎 Conteúdo exclusivo do canal VIP. Entre no canal para receber os bilhetes.")
         return
+    entregar(m, "VIP", "os Bilhetes VIP de hoje")
 
-    msg_wait = bot.reply_to(message, f"⚽ *A pesquisar dados ao vivo para:* {partida}...", parse_mode="Markdown")
+
+@bot.message_handler(commands=["super_quinta"])
+def cmd_quinta(m):
+    if not pode_ver_vip(m):
+        enviar_texto(m.chat.id, "💎 Conteúdo exclusivo do canal VIP.")
+        return
+    if agora().weekday() != 3:
+        enviar_texto(m.chat.id, "⚠️ A Super Quinta só fica disponível às quintas-feiras.")
+        return
+    entregar(m, "QUINTA_FEIRA", "o Bilhete Super Quinta")
+
+
+@bot.message_handler(commands=["forcar_postagem"])
+def cmd_forcar(m):
+    if not is_admin(m):
+        enviar_texto(m.chat.id, "⛔ Comando restrito a administradores.")
+        return
+    enviar_texto(m.chat.id, "⚙️ <b>A gerar e enviar para os canais...</b>")
     try:
-        prompt = f"Pesquise dados ao vivo na internet sobre a partida de futebol: {partida}. Forneça momento recente dos times, desfalques importantes e uma sugestão clara de palpite com Odd estimada."
-        resposta = chamar_gemini_com_fallback_profissional(prompt)
-        enviar_mensagem_segura(message.chat.id, resposta)
-    except Exception as e:
-        enviar_mensagem_segura(message.chat.id, f"❌ Erro na análise: {e}")
-    finally:
-        try:
-            bot.delete_message(message.chat.id, msg_wait.message_id)
-        except Exception:
-            pass
+        obter_bilhetes(forcar=True)
+        postar_nos_canais()
+        enviar_texto(m.chat.id, "✅ Postagem concluída!")
+    except Exception as e:  # noqa: BLE001
+        enviar_texto(m.chat.id, f"❌ Erro: {esc(str(e)[:800])}")
 
 
-@bot.message_handler(commands=['forcar_postagem'])
-def force_post(message):
-    enviar_mensagem_segura(message.chat.id, "⚙️ *A iniciar envio imediato para os canais Grátis e VIP...*")
-    try:
-        bilhetes, raw_text = obter_ou_gerar_bilhetes_diarios()
-        if FREE_CHANNEL_ID:
-            enviar_bilhetes(FREE_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="NORMAL")
-        if VIP_CHANNEL_ID:
-            enviar_bilhetes(VIP_CHANNEL_ID, bilhetes, raw_text=raw_text, apenas_tipo="VIP")
-        enviar_mensagem_segura(message.chat.id, "✅ Postagem forçada concluída com sucesso!")
-    except Exception as e:
-        enviar_mensagem_segura(message.chat.id, f"❌ Erro ao forçar postagem: {e}")
+@bot.message_handler(commands=["status"])
+def cmd_status(m):
+    enviar_texto(m.chat.id, (
+        "🤖 <b>Status do Bot</b>\n"
+        f"🕒 Hora local: {agora().strftime('%d/%m/%Y %H:%M')}\n"
+        f"🧠 Modelos: <code>{esc(', '.join(MODELS_TO_TRY))}</code>\n"
+        f"🔑 Gemini: {'✅' if client else '❌'}\n"
+        f"🖼️ Pillow: {'✅' if HAS_PILLOW else '❌'}\n"
+        f"📢 Canal Grátis: {'✅' if FREE_CHANNEL_ID else '❌'} | 💎 VIP: {'✅' if VIP_CHANNEL_ID else '❌'}\n"
+        f"📦 Cache: {CACHE['data'] or 'vazio'} ({len(CACHE['bilhetes'])} bilhetes)"
+    ))
 
 
 # ==========================================
-# 8. LOOP RESILIENTE
+# 9. EXECUÇÃO
 # ==========================================
 if __name__ == "__main__":
-    print("🤖 Bot FutBet VIP operacional...")
+    log.info("Bot FutBet VIP iniciado. Modelos: %s", MODELS_TO_TRY)
     try:
-        bot.remove_webhook(drop_pending_updates=True)
+        bot.remove_webhook()
         time.sleep(1)
-    except Exception as e:
-        print(f"Aviso webhook: {e}")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Aviso webhook: %s", e)
 
     while True:
         try:
-            bot.polling(non_stop=True, timeout=30, long_polling_timeout=30)
-        except Exception as e:
-            print(f"⚠️ Reconexão do bot em 5 segundos: {e}")
+            bot.infinity_polling(timeout=20, long_polling_timeout=20, skip_pending=True)
+        except Exception as e:  # noqa: BLE001
+            log.error("Reconectando: %s", e)
             time.sleep(5)
+    
